@@ -83,6 +83,15 @@ out
 dist
 .output
 
+# Vite specific
+dist
+dist-ssr
+*.local
+
+# Editor folders
+.vscode/
+.idea/
+
 # Gatsby files
 .cache/
 # Comment in the public line in if your project uses Gatsby and not Next.js
