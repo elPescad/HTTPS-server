@@ -14,28 +14,56 @@ const timelineData = [
     title: '1960s - 1990s: Cuba',
     subtitle: 'Your home country',
     color: 'bg-orange-100', // Vintage/Sepia vibe
-    textColor: 'text-amber-900'
+    textColor: 'text-amber-900',
+    image: [
+      {id: 'cuba-image-01', src: 'temp'},
+      {id: 'cuba-image-02', src: 'temp'},
+      {id: 'cuba-image-03', src: 'temp'},
+      {id: 'cuba-image-04', src: 'temp'},
+      {id: 'cuba-image-05', src: 'temp'},
+    ]
   },
   {
     id: '2000s',
     title: '2000s: A New Chapter',
     subtitle: 'Start of a new life',
     color: 'bg-blue-100', // Calmer, transition color
-    textColor: 'text-blue-900'
+    textColor: 'text-blue-900',
+    image: [
+      {id: '2000s-image-01', src: 'temp'},
+      {id: '2000s-image-02', src: 'temp'},
+      {id: '2000s-image-03', src: 'temp'},
+      {id: '2000s-image-04', src: 'temp'},
+      {id: '2000s-image-05', src: 'temp'},
+    ]
   },
   {
     id: '2010s',
     title: '2010s: Big Things',
     subtitle: 'When things were a little simpler',
     color: 'bg-purple-100', // Soft transition color
-    textColor: 'text-purple-900'
+    textColor: 'text-purple-900',
+    image: [
+      {id: '2010s-image-01', src: 'temp'},
+      {id: '2010s-image-02', src: 'temp'},
+      {id: '2010s-image-03', src: 'temp'},
+      {id: '2010s-image-04', src: 'temp'},
+      {id: '2010s-image-05', src: 'temp'},
+    ]
   },
   {
     id: 'present',
     title: 'Today',
     subtitle: 'Thank you for everything.',
     color: 'bg-rose-100', // Warm, loving color
-    textColor: 'text-rose-900'
+    textColor: 'text-rose-900',
+    image: [
+      {id: 'present-image-01', src: 'temp'},
+      {id: 'present-image-02', src: 'temp'},
+      {id: 'present-image-03', src: 'temp'},
+      {id: 'present-image-04', src: 'temp'},
+      {id: 'present-image-05', src: 'temp'},
+    ]
   }
 ];
 
@@ -60,6 +88,19 @@ export default function App() {
             <p className="text-2xl font-light opacity-80">
               {decade.subtitle}
             </p>
+
+            <div className={'flex flex-row items-center justify-center gap-4'}>
+              {decade.image?.map((picture) => (
+                <div
+                  key = {picture.id}
+                  className="w-64 h-64 overflow-hidden rounded-xl shadow-lg" 
+                >
+                  <img src={picture.src} 
+                  alt="Yeah I guess it's not loading" 
+                  className="w-full h-full object-cover"/>
+                </div>
+              ))}
+            </div>
           </motion.div>
         </section>
       ))}
