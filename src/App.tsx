@@ -64,7 +64,7 @@ const timelineData = [
       {id: 'present-image-04', src: '../images/Screenshot 2026-04-30 124415.png'},
       {id: 'present-image-05', src: '../images/Screenshot 2026-04-30 124601.png'},
     ]
-  }
+  },
 ];
 
 export default function App() {
@@ -104,6 +104,26 @@ export default function App() {
           </motion.div>
         </section>
       ))}
+      <section 
+        className={`min-h-screen w-full flex flex-col items-center justify-center p-8 transition-colors duration-1000 bg-slate-900 text-[#e88310]`}
+      >
+        <motion.div
+          initial={{ opacity: 0, y: 50 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: false, amount: 0.2 }}
+          transition={{ duration: 0.8 }}
+          className="text-center max-w-4xl"
+        >
+          <h1 className="text-5xl md:text-7xl font-bold mb-6 tracking-wide">
+            final message
+          </h1>
+          <p className="text-2xl font-bold opacity-80">
+            I didn't know what to get you for mothers day so I just decided to do what I do best which is things
+            I'm good at programming and decided to do that for you instead. I don't talk much cuz I don't have 
+            anything to say but I do care. Happy mothers day.
+          </p>
+        </motion.div>
+      </section>
     </div>
   );
 }
