@@ -16,11 +16,11 @@ const timelineData = [
     color: 'bg-orange-100', // Vintage/Sepia vibe
     textColor: 'text-amber-900',
     image: [
-      {id: 'cuba-image-01', src: 'temp'},
-      {id: 'cuba-image-02', src: 'temp'},
-      {id: 'cuba-image-03', src: 'temp'},
-      {id: 'cuba-image-04', src: 'temp'},
-      {id: 'cuba-image-05', src: 'temp'},
+      {id: 'cuba-image-01', src: '../images/Screenshot 2026-04-30 122316.png'},
+      {id: 'cuba-image-02', src: '../images/Screenshot 2026-04-30 122345.png'},
+      {id: 'cuba-image-03', src: '../images/Screenshot 2026-04-30 122507.png'},
+      {id: 'cuba-image-04', src: '../images/Screenshot 2026-04-30 122613.png'},
+      {id: 'cuba-image-05', src: '../images/Screenshot 2026-04-30 122832.png'},
     ]
   },
   {
@@ -30,11 +30,11 @@ const timelineData = [
     color: 'bg-blue-100', // Calmer, transition color
     textColor: 'text-blue-900',
     image: [
-      {id: '2000s-image-01', src: 'temp'},
-      {id: '2000s-image-02', src: 'temp'},
-      {id: '2000s-image-03', src: 'temp'},
-      {id: '2000s-image-04', src: 'temp'},
-      {id: '2000s-image-05', src: 'temp'},
+      {id: '2000s-image-01', src: '../images/Screenshot 2026-04-30 122937.png'},
+      {id: '2000s-image-02', src: '../images/Screenshot 2026-04-30 123020.png'},
+      {id: '2000s-image-03', src: '../images/Screenshot 2026-04-30 123542.png'},
+      {id: '2000s-image-04', src: '../images/Screenshot 2026-04-30 123601.png'},
+      {id: '2000s-image-05', src: '../images/Screenshot 2026-04-30 123624.png'},
     ]
   },
   {
@@ -44,11 +44,11 @@ const timelineData = [
     color: 'bg-purple-100', // Soft transition color
     textColor: 'text-purple-900',
     image: [
-      {id: '2010s-image-01', src: 'temp'},
-      {id: '2010s-image-02', src: 'temp'},
-      {id: '2010s-image-03', src: 'temp'},
-      {id: '2010s-image-04', src: 'temp'},
-      {id: '2010s-image-05', src: 'temp'},
+      {id: '2010s-image-01', src: '../images/Screenshot 2026-04-30 123832.png'},
+      {id: '2010s-image-02', src: '../images/Screenshot 2026-04-30 123845.png'},
+      {id: '2010s-image-03', src: '../images/Screenshot 2026-04-30 123927.png'},
+      {id: '2010s-image-04', src: '../images/Screenshot 2026-04-30 124049.png'},
+      {id: '2010s-image-05', src: '../images/Screenshot 2026-04-30 124205.png'},
     ]
   },
   {
@@ -58,11 +58,11 @@ const timelineData = [
     color: 'bg-rose-100', // Warm, loving color
     textColor: 'text-rose-900',
     image: [
-      {id: 'present-image-01', src: 'temp'},
-      {id: 'present-image-02', src: 'temp'},
-      {id: 'present-image-03', src: 'temp'},
-      {id: 'present-image-04', src: 'temp'},
-      {id: 'present-image-05', src: 'temp'},
+      {id: 'present-image-01', src: '../images/Screenshot 2026-04-30 124311.png'},
+      {id: 'present-image-02', src: '../images/Screenshot 2026-04-30 124331.png'},
+      {id: 'present-image-03', src: '../images/Screenshot 2026-04-30 124404.png'},
+      {id: 'present-image-04', src: '../images/Screenshot 2026-04-30 124415.png'},
+      {id: 'present-image-05', src: '../images/Screenshot 2026-04-30 124601.png'},
     ]
   }
 ];
@@ -78,7 +78,7 @@ export default function App() {
           <motion.div
             initial={{ opacity: 0, y: 50 }}
             whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: false, amount: 0.5 }}
+            viewport={{ once: false, amount: 0.2 }}
             transition={{ duration: 0.8 }}
             className="text-center max-w-4xl"
           >
@@ -89,7 +89,7 @@ export default function App() {
               {decade.subtitle}
             </p>
 
-            <div className={'flex flex-row items-center justify-center gap-4'}>
+            <div className={'flex flex-col items-center justify-center gap-4'}>
               {decade.image?.map((picture) => (
                 <div
                   key = {picture.id}
