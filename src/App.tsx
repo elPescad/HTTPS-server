@@ -93,7 +93,7 @@ export default function App() {
               {decade.image?.map((picture) => (
                 <div
                   key = {picture.id}
-                  className="w-64 h-64 overflow-hidden rounded-xl shadow-lg" 
+                  className="w-120 h-120 overflow-hidden rounded-xl shadow-lg" 
                 >
                   <img src={picture.src} 
                   alt="Yeah I guess it's not loading" 
