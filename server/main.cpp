@@ -1,72 +1,124 @@
 #include <iostream>
+#include <string>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
-// Tell the compiler to link the Winsock library (works in MSVC)
 #pragma comment(lib, "Ws2_32.lib") 
 
 int main() {
-    // 0. INITIALIZE WINSOCK (Windows Specific!)
+    //start up WSA
     WSADATA wsaData;
-    int wsaerr = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (wsaerr != 0) {
-        std::cerr << "The Winsock dll not found!" << std::endl;
+    int iresult;
+
+    iresult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if(iresult != 0)
+    {
+        // if WSA failed to startup give error num
+        // temp error handler. Check docs for error type.
+        std::cout << "WSAStartup failed with error: " << iresult << std::endl;
         return 1;
     }
 
-    // 1. CREATE THE SOCKET
-    // Notice Windows uses 'SOCKET' instead of a standard 'int'
-    SOCKET server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (server_fd == INVALID_SOCKET) {
-        std::cerr << "Failed to create socket! Error: " << WSAGetLastError() << std::endl;
+    // Check the bytes to see if they match the 2.2 version
+    // If not return an error and free up space
+    if(LOBYTE(wsaData.wVersion) != 2 || HIBYTE(wsaData.wVersion) != 2)
+    {
+        std::cout << "Could not find a usable version of winsock.dll" << std::endl;
         WSACleanup();
-        return 1;
+        return 0;
+    }
+    else
+    {
+        std::cout << "The winsock dll 2.2 was found okay" << std::endl;
     }
 
-    // 2. CONFIGURE THE ADDRESS (Port and IP)
-    struct sockaddr_in address;
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY; 
-    address.sin_port = htons(8080); 
+    // Create SOCKET
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-    // 3. BIND THE SOCKET
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) == SOCKET_ERROR) {
-        std::cerr << "Bind failed! Error: " << WSAGetLastError() << std::endl;
-        closesocket(server_fd);
+    // Check for invalid socket
+    if(sock == INVALID_SOCKET)
+    {
+        std::cout << "Socket function failed with error " << WSAGetLastError() << std::endl;
+    }
+    else
+    {
+        std::cout << "Socket function succeeded" << std::endl;
+    }
+
+    //struct specifically for IPv4 to be added to bind.
+    sockaddr_in service;
+
+    //specifies IPv4 protocol
+    service.sin_family = AF_INET;
+
+    //Local IP address for now
+    inet_pton(AF_INET, "127.0.0.1", &service.sin_addr.s_addr);
+
+    //htons stands for host to network.
+    //we will be hosting on localhost:8080
+    service.sin_port = htons(8080);
+
+    //Bind socket to local address whoever it may be.
+    //Tells computer "hey send or recieve only from this place"
+    iresult = bind(sock, (sockaddr*) &service, sizeof(service));
+    //Error handling
+    if(iresult != 0)
+    {
+        std::cout << "Bind failed with error " << WSAGetLastError() << std::endl;
         WSACleanup();
-        return 1;
+        return 0;
+    }
+    else
+    {
+        std::cout << "Bind returned succesfully" << std::endl;
     }
 
-    // 4. LISTEN FOR CONNECTIONS
-    if (listen(server_fd, 3) == SOCKET_ERROR) {
-        std::cerr << "Listen failed! Error: " << WSAGetLastError() << std::endl;
-        closesocket(server_fd);
+    //Puts the socket in a listening state to check for
+    //incoming requests
+    iresult = listen(sock, SOMAXCONN);
+    if(iresult != 0)
+    {
+        std::cout << "Listen failed with error " << WSAGetLastError() << std::endl;
         WSACleanup();
-        return 1;
+        return 0;
     }
-    
-    std::cout << "Server is officially listening on port 8080..." << std::endl;
 
-    // 5. ACCEPT A CONNECTION
-    int addrlen = sizeof(address);
-    std::cout << "Waiting for a browser to connect..." << std::endl;
-    
-    SOCKET user_socket = accept(server_fd, (struct sockaddr *)&address, &addrlen);
-    if (user_socket == INVALID_SOCKET) {
-        std::cerr << "Failed to accept connection! Error: " << WSAGetLastError() << std::endl;
-        closesocket(server_fd);
+    std::cout << "Listening on socket" << std::endl;
+
+    sockaddr_in clientService;
+    int addrlen = sizeof(clientService);
+
+    SOCKET acceptSock = accept(sock, (sockaddr*) &clientService, &addrlen);
+    if(acceptSock == INVALID_SOCKET)
+    {
+        std::cout << "Accept failed with error " << WSAGetLastError() << std::endl;
+        closesocket(sock);
         WSACleanup();
-        return 1;
+        return 0;
     }
 
-    std::cout << "\nSUCCESS! A client connected!" << std::endl;
+    std::cout << "Client connected" << std::endl;
 
-    // 6. HANG UP (Windows uses closesocket instead of close)
-    closesocket(user_socket);
-    closesocket(server_fd);
-    WSACleanup(); // Shut down the Winsock library
+    iresult = closesocket(sock);
+    if(iresult != 0)
+    {
+        std::cout << "closesocket function failed with error " << WSAGetLastError() << std::endl;
+        WSACleanup();
+        return 0;
+    }
 
-    std::cout << "Connection closed. Shutting down server." << std::endl;
+    iresult = closesocket(acceptSock);
+    if(iresult != 0)
+    {
+        std::cout << "closesocket function failed with error " << WSAGetLastError() << std::endl;
+        WSACleanup();
+        return 0;
+    }
 
-    return 0;
+    // typically won't be called since server will be run for a while
+    // however is necessary to prevent memory leaks.
+
+    std::cout << "Yup we got it" << std::endl;
+    WSACleanup();
+    return 1;
 }
