@@ -111,8 +111,6 @@ int main() {
     //too much memory.
     char buffer[1024] = {0};
 
-    std::cout << "Bytes sent: " << iresult << std::endl; 
-
     //recieves the incoming data from the client
     iresult = recv(acceptSock, buffer, sizeof(buffer), 0);
     //data is recieved in bytes so if multiple bytes
@@ -154,6 +152,8 @@ int main() {
         WSACleanup();
         return 0;
     }
+
+    std::cout << "Bytes sent: " << iresult << std::endl; 
 
     //close sockets to free up resources and prevent resource leaks
     iresult = closesocket(sock);
