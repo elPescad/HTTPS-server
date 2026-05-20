@@ -65,6 +65,7 @@ int main() {
     if(iresult != 0)
     {
         std::cout << "Bind failed with error " << WSAGetLastError() << std::endl;
+        closesocket(sock);
         WSACleanup();
         return 0;
     }
@@ -79,6 +80,7 @@ int main() {
     if(iresult != 0)
     {
         std::cout << "Listen failed with error " << WSAGetLastError() << std::endl;
+        closesocket(sock);
         WSACleanup();
         return 0;
     }
@@ -93,6 +95,7 @@ int main() {
     {
         std::cout << "Accept failed with error " << WSAGetLastError() << std::endl;
         closesocket(sock);
+        closesocket(acceptSock);
         WSACleanup();
         return 0;
     }
