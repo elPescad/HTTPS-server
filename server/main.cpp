@@ -99,6 +99,43 @@ int main() {
 
     std::cout << "Client connected" << std::endl;
 
+    char buffer[1024] = {0};
+
+    std::cout << "Bytes sent: " << iresult << std::endl; 
+
+    iresult = recv(acceptSock, buffer, sizeof(buffer), 0);
+
+    if(iresult > 0)
+    {
+        std::cout << "Bytes recieved " << iresult << std::endl;
+        std::cout << "Here is what the browser said " << std::endl;
+        std::cout << buffer << std::endl;
+    }
+    else if(iresult == 0)
+    {
+        std::cout << "Connection closed" << std::endl;
+    }
+    else
+    {
+        std::cout << "recv failed " << WSAGetLastError() << std::endl;
+    }
+
+    const char *sendbuf = "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/html\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "<h1>Hello from the bare metal!</h1><p>You successfully built a socket server.</p>";
+
+    iresult = send(acceptSock, sendbuf, (int)strlen(sendbuf), 0);
+    if(iresult == SOCKET_ERROR)
+    {
+        std::cout << "Send failed with error " << WSAGetLastError() << std::endl;
+        closesocket(sock);
+        closesocket(acceptSock);
+        WSACleanup();
+        return 0;
+    }
+
     iresult = closesocket(sock);
     if(iresult != 0)
     {
@@ -117,7 +154,6 @@ int main() {
 
     // typically won't be called since server will be run for a while
     // however is necessary to prevent memory leaks.
-
     std::cout << "Yup we got it" << std::endl;
     WSACleanup();
     return 1;
