@@ -87,9 +87,11 @@ int main() {
 
     std::cout << "Listening on socket" << std::endl;
 
+    //struct for IPv4 but for accepting socket
     sockaddr_in clientService;
     int addrlen = sizeof(clientService);
 
+    //The socket we are accepting a connection from
     SOCKET acceptSock = accept(sock, (sockaddr*) &clientService, &addrlen);
     if(acceptSock == INVALID_SOCKET)
     {
@@ -102,34 +104,49 @@ int main() {
 
     std::cout << "Client connected" << std::endl;
 
+    //buffer so that ram isn't overloaded
+    //essentially makes it so we can only 
+    //recieve 1024 bytes at a time
+    //if more needed we can loop
+    //This prevents crashes or from using
+    //too much memory.
     char buffer[1024] = {0};
 
     std::cout << "Bytes sent: " << iresult << std::endl; 
 
+    //recieves the incoming data from the client
     iresult = recv(acceptSock, buffer, sizeof(buffer), 0);
-
+    //data is recieved in bytes so if multiple bytes
+    //there is data
     if(iresult > 0)
     {
         std::cout << "Bytes recieved " << iresult << std::endl;
         std::cout << "Here is what the browser said " << std::endl;
         std::cout << buffer << std::endl;
     }
+    //If no bytes data closed
     else if(iresult == 0)
     {
         std::cout << "Connection closed" << std::endl;
     }
+    //If neither then something went wrong
     else
     {
         std::cout << "recv failed " << WSAGetLastError() << std::endl;
     }
 
-    const char *sendbuf = "HTTP/1.1 200 OK\r\n"
+    //Create a read only char pointer
+    //make a const so it cannot be change accidentally
+    //this is the data we will send to be displayed to the browser
+    //temporary
+    const char *data = "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/html\r\n"
         "Connection: close\r\n"
         "\r\n"
         "<h1>Hello from the bare metal!</h1><p>You successfully built a socket server.</p>";
 
-    iresult = send(acceptSock, sendbuf, (int)strlen(sendbuf), 0);
+    //send data over to client side
+    iresult = send(acceptSock, data, (int)strlen(data), 0);
     if(iresult == SOCKET_ERROR)
     {
         std::cout << "Send failed with error " << WSAGetLastError() << std::endl;
@@ -139,6 +156,7 @@ int main() {
         return 0;
     }
 
+    //close sockets to free up resources and prevent resource leaks
     iresult = closesocket(sock);
     if(iresult != 0)
     {
