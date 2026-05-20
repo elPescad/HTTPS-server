@@ -97,7 +97,6 @@ int main() {
     {
         std::cout << "Accept failed with error " << WSAGetLastError() << std::endl;
         closesocket(sock);
-        closesocket(acceptSock);
         WSACleanup();
         return 0;
     }
