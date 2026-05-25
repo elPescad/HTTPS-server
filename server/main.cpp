@@ -1,12 +1,51 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <sstream>
+#include <fstream>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
 #pragma comment(lib, "Ws2_32.lib") 
+
+//file Checker
+std::string getFileContents(const std::string& filePath)
+{
+    //Make it read the file in binary mode to prevent
+    //Windows from altering line endings
+    std::ifstream file(filePath, std::ios::binary);
+
+    //If file doesn't open then 
+    //return nothing
+    if(!file.is_open())
+    {
+        return "";        
+    }
+
+    std::ostringstream buffer;
+
+    //essentially puts the contents
+    //of file into buffer
+    buffer << file.rdbuf();
+
+    return buffer.str();
+}
+
+//Checks the mime type of the filepath
+std::string getMimeType(const std::string &filePath)
+{
+    if(filePath.find(".html") != std::string::npos) return "text/html";
+    else if(filePath.find(".css") != std::string::npos) return "text/css";
+    else if(filePath.find(".js") != std::string::npos) return "application/javascript";
+    else if(filePath.find(".png") != std::string::npos) return "image/png";
+    else if(filePath.find(".jpg") != std::string::npos || filePath.find(".jpeg") != std::string::npos) return "image/jpeg";
+    else if(filePath.find(".svg") != std::string::npos) return "image/svg+xml";
+    else if(filePath.find(".ico") != std::string::npos) return "image/x-icon";
+    //Fall back incase it's none
+    else return "text/plain";
+}
 
 //function to run server
 void runServer(SSL_CTX* ctx)
@@ -205,8 +244,95 @@ void runServer(SSL_CTX* ctx)
                 if(iresult > 0)
                 {
                     std::cout << "Bytes recieved " << iresult << std::endl;
-                    std::cout << "Here is what the browser said " << std::endl;
-                    std::cout << buffer << std::endl;
+
+                    //Allocates iresult bytes from buffer into new memory space
+                    std::string rawRequest(buffer, iresult);
+
+                    //pointes to the first byte of this new string in memory
+                    std::istringstream requestStream(rawRequest);
+
+                    //strings to store the method, path, and protocol
+                    std::string method, path, protocol;
+
+                    //>> skips white space so method takes method
+                    //path the path and protocol the protocol
+                    requestStream >> method >> path >> protocol;
+                    std::cout << "Browser requested " << path << std::endl;
+
+                    std::string filePath;
+                    if(path == "/")
+                    {
+                        //Go up to dist and and grab index.html
+                        filePath = "../dist/index.html";
+                    }
+                    else
+                    {
+                        //Strips the starting slash so that
+                        //we can find the file locally within dist
+                        filePath = "../dist/" + path.substr(1);
+                    }
+
+                    //Getting path result and creating
+                    //A response to hand off to SSL_write
+                    std::string httpResponse;
+                    //Attempt to grab a file from the hard drive
+                    std::string fileContent = getFileContents(filePath);;
+                    if(!fileContent.empty())
+                    {
+                        //display file content based on the files
+                        //mime type
+                        std::string mimeType = getMimeType(filePath);
+
+                        httpResponse = "HTTP/1.1 200 OK\r\n"
+                                        "Content-Type: " + mimeType +  "\r\n"
+                                        //Line required to tell browser where file ends
+                                        "Content-Length: " + std::to_string(fileContent.length()) + "\r\n"
+                                        "Connection: Close\r\n\r\n" + fileContent;
+                    }
+                    else
+                    {
+                        httpResponse = "HTTP/1.1 404 Not Found\r\n"
+                                       "Content-Type: text/html\r\n"
+                                       "Connection: close\r\n\r\n"
+                                       "<h1>404 Error</h1><p>The file '" + filePath + "' does not exist</p>";
+                    }
+
+                    //send data over to client side
+                    //make sure to convert httpResponse into a c style string or
+                    //at use .data() to make it a pointer to a string of characters
+                    iresult = SSL_write(it->clientSSL, httpResponse.c_str(), httpResponse.length());
+                    if (iresult <= 0)
+                    {
+                        int err = SSL_get_error(it->clientSSL, iresult);
+
+                        switch (err)
+                        {
+                            case SSL_ERROR_ZERO_RETURN:
+                                std::cout << "Connection closed cleanly by peer\n";
+                                break;
+
+                            //Added since we might need to read
+                            //TLS records from peer first
+                            //either way retry needed
+                            case SSL_ERROR_WANT_READ:
+                            case SSL_ERROR_WANT_WRITE:
+                                std::cout << "SSL_write needs retry\n";
+                                break;
+
+                            default:
+                                std::cout << "SSL_write failed\n";
+
+                                ERR_print_errors_fp(stderr);
+                                break;
+                        }
+                        SSL_shutdown(it->clientSSL);
+                        SSL_free(it->clientSSL);
+                        closesocket(it->clientSock);
+                        it = clients.erase(it);
+                        continue;
+                    }
+
+                    std::cout << "Bytes sent: " << iresult << std::endl; 
                 }
                 //If no bytes data closed
                 else if (iresult <= 0)
@@ -240,51 +366,6 @@ void runServer(SSL_CTX* ctx)
                     it = clients.erase(it);
                     continue;
                 }
-
-                //Create a read only char pointer
-                //make a const so it cannot be change accidentally
-                //this is the data we will send to be displayed to the browser
-                //temporary
-                const char *data = "HTTP/1.1 200 OK\r\n"
-                    "Content-Type: text/html\r\n"
-                    "Connection: close\r\n"
-                    "\r\n"
-                    "<h1>Hello from the bare metal!</h1><p>You successfully built a socket server.</p>";
-
-                //send data over to client side
-                iresult = SSL_write(it->clientSSL, data, (int)strlen(data));
-                if (iresult <= 0)
-                {
-                    int err = SSL_get_error(it->clientSSL, iresult);
-
-                    switch (err)
-                    {
-                        case SSL_ERROR_ZERO_RETURN:
-                            std::cout << "Connection closed cleanly by peer\n";
-                            break;
-
-                        //Added since we might need to read
-                        //TLS records from peer first
-                        //either way retry needed
-                        case SSL_ERROR_WANT_READ:
-                        case SSL_ERROR_WANT_WRITE:
-                            std::cout << "SSL_write needs retry\n";
-                            break;
-
-                        default:
-                            std::cout << "SSL_write failed\n";
-
-                            ERR_print_errors_fp(stderr);
-                            break;
-                    }
-                    SSL_shutdown(it->clientSSL);
-                    SSL_free(it->clientSSL);
-                    closesocket(it->clientSock);
-                    it = clients.erase(it);
-                    continue;
-                }
-
-                std::cout << "Bytes sent: " << iresult << std::endl; 
 
                 //Close and free SSL objects and close sockets
                 SSL_shutdown(it->clientSSL);
