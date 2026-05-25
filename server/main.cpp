@@ -10,29 +10,6 @@
 
 #pragma comment(lib, "Ws2_32.lib") 
 
-//file Checker
-std::string getFileContents(const std::string& filePath)
-{
-    //Make it read the file in binary mode to prevent
-    //Windows from altering line endings
-    std::ifstream file(filePath, std::ios::binary);
-
-    //If file doesn't open then 
-    //return nothing
-    if(!file.is_open())
-    {
-        return "";        
-    }
-
-    std::ostringstream buffer;
-
-    //essentially puts the contents
-    //of file into buffer
-    buffer << file.rdbuf();
-
-    return buffer.str();
-}
-
 //Checks the mime type of the filepath
 std::string getMimeType(const std::string &filePath)
 {
@@ -260,10 +237,22 @@ void runServer(SSL_CTX* ctx)
                     std::cout << "Browser requested " << path << std::endl;
 
                     std::string filePath;
+                    std::string httpResponse;
                     if(path == "/")
                     {
                         //Go up to dist and and grab index.html
                         filePath = "../dist/index.html";
+                    }
+                    //incase we want to display live data
+                    //coming from c++ memory
+                    else if(path == "/api/status")
+                    {
+                        std::string jsonStr = "{\"status\": \"online\", \"version\": \"1.0.0\"}";
+
+                        httpResponse = "HTTP/1.1 200 OK\r\n"
+                                       "Content-Type: application/json\r\n"
+                                       "Content-Length: " + std::to_string(jsonStr.length()) + "\r\n"
+                                       "Connection: Close\r\n\r\n" + jsonStr;
                     }
                     else
                     {
@@ -274,20 +263,110 @@ void runServer(SSL_CTX* ctx)
 
                     //Getting path result and creating
                     //A response to hand off to SSL_write
-                    std::string httpResponse;
+
                     //Attempt to grab a file from the hard drive
-                    std::string fileContent = getFileContents(filePath);;
-                    if(!fileContent.empty())
+                    //Make it read the file in binary mode to prevent
+                    //Windows from altering line endings and also set to end of file
+                    std::ifstream file(filePath, std::ios::binary | std::ios::ate);
+
+                    //If file doesn't open then 
+                    //return nothing
+                    if(file.is_open())
                     {
+                        //manually get the total number of bytes in the file
+                        //without manually having to seek to the end after opening
+                        std::streamsize fileSize = file.tellg();
+
+                        //Go back to starting pointer
+                        file.seekg(0, std::ios::beg);
+
                         //display file content based on the files
                         //mime type
                         std::string mimeType = getMimeType(filePath);
 
-                        httpResponse = "HTTP/1.1 200 OK\r\n"
+                        //send header only
+                        std::string headers = "HTTP/1.1 200 OK\r\n"
                                         "Content-Type: " + mimeType +  "\r\n"
                                         //Line required to tell browser where file ends
-                                        "Content-Length: " + std::to_string(fileContent.length()) + "\r\n"
-                                        "Connection: Close\r\n\r\n" + fileContent;
+                                        "Content-Length: " + std::to_string(fileSize) + "\r\n"
+                                        "Connection: Close\r\n\r\n";
+
+                        //send data over to client side
+                        iresult = SSL_write(it->clientSSL, headers.c_str(), headers.length());
+                        if (iresult <= 0)
+                        {
+                            int err = SSL_get_error(it->clientSSL, iresult);
+
+                            switch (err)
+                            {
+                                case SSL_ERROR_ZERO_RETURN:
+                                    std::cout << "Connection closed cleanly by peer\n";
+                                    break;
+
+                                //Added since we might need to read
+                                //TLS records from peer first
+                                //either way retry needed
+                                case SSL_ERROR_WANT_READ:
+                                case SSL_ERROR_WANT_WRITE:
+                                    std::cout << "SSL_write needs retry\n";
+                                    break;
+
+                                default:
+                                    std::cout << "SSL_write failed\n";
+
+                                    ERR_print_errors_fp(stderr);
+                                    break;
+                            }
+                            SSL_shutdown(it->clientSSL);
+                            SSL_free(it->clientSSL);
+                            closesocket(it->clientSock);
+                            it = clients.erase(it);
+                            continue;
+                        }
+
+                        //send file in 8KB chunks
+                        char buffer[8192];
+                        //attemps to read enough bytes to fill buffer
+                        //OR if gcount > 0 then there is a final
+                        //partial chunk of data that will be read
+                        while(file.read(buffer, sizeof(buffer)) || file.gcount() > 0)
+                        {
+                            //send data over to client side
+                            //use file.gcount to tell use exactly how many bytes were just read
+                            iresult = SSL_write(it->clientSSL, buffer, file.gcount());
+                            if (iresult <= 0)
+                            {
+                                int err = SSL_get_error(it->clientSSL, iresult);
+
+                                switch (err)
+                                {
+                                    case SSL_ERROR_ZERO_RETURN:
+                                        std::cout << "Connection closed cleanly by peer\n";
+                                        break;
+
+                                    //Added since we might need to read
+                                    //TLS records from peer first
+                                    //either way retry needed
+                                    case SSL_ERROR_WANT_READ:
+                                    case SSL_ERROR_WANT_WRITE:
+                                        std::cout << "SSL_write needs retry\n";
+                                        break;
+
+                                    default:
+                                        std::cout << "SSL_write failed\n";
+
+                                        ERR_print_errors_fp(stderr);
+                                        break;
+                                }
+                                SSL_shutdown(it->clientSSL);
+                                SSL_free(it->clientSSL);
+                                closesocket(it->clientSock);
+                                it = clients.erase(it);
+                                continue;
+                            }
+                        }
+
+                        file.close();
                     }
                     else
                     {
