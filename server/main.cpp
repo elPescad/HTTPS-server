@@ -3,6 +3,9 @@
 #include <vector>
 #include <sstream>
 #include <fstream>
+#include <filesystem>
+#include <unordered_map>
+#include <iomanip>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <openssl/ssl.h>
@@ -10,24 +13,189 @@
 
 #pragma comment(lib, "Ws2_32.lib") 
 
+namespace fs = std::filesystem;
+
+
+//trims white space from both sides of string
+std::string trim(const std::string& str)
+{
+    size_t first = str.find_first_not_of(" \t\r\n");
+    if(first == std::string::npos) return "";
+    size_t last = str.find_last_not_of(" \t\r\n");
+    return str.substr(first, (last - first + 1));
+}
+
+//Parses HTTP headers into an unordered_map
+std::unordered_map<std::string, std::string> parseHeaders(const std::string& rawRequest)
+{
+    std::unordered_map<std::string, std::string> headers;
+
+    //find where the first line ends
+    size_t pos = rawRequest.find("\r\n");
+    if(pos == std::string::npos) return headers;
+
+    //start looking at the next line
+    //because pos is where r lives so we
+    //go to characters to the right
+    size_t start = pos + 2;
+
+    while(start < rawRequest.length())
+    {
+        //finds the next \r\n but begins from start
+        size_t end = rawRequest.find("\r\n", start);
+        if(end == std::string::npos) break;
+
+        std::string line = rawRequest.substr(start, end - start);
+
+        //if line empty that means the end of the header
+        if(line.empty()) break;
+
+        //Find colon seperating key and value
+        size_t colonPos = line.find(":");
+        if(colonPos != std::string::npos)
+        {
+            std::string key = line.substr(0, colonPos);
+            std::string value = line.substr(colonPos + 1);
+
+            //convert key to lowercase for case insensitive lookups
+            for(char& c : key) c = std::tolower(c);
+
+            headers[key] = trim(value);
+        }
+
+        start = end + 2; // move to next line;
+    }
+
+    return headers;
+}
+
+//Error handler for SSL_Write
+int sslWriteError(const int& iresult, SSL* ssl, SOCKET sock)
+{
+    if (iresult <= 0)
+    {
+        int err = SSL_get_error(ssl, iresult);
+
+        switch (err)
+        {
+            //clean close
+            case SSL_ERROR_ZERO_RETURN:
+                std::cout << "Connection closed cleanly by peer\n";
+                SSL_shutdown(ssl);
+                SSL_free(ssl);
+                closesocket(sock);
+                return 0;
+
+            //Added since we might need to read
+            //TLS records from peer first
+            //either way retry needed
+            //return 2 to let main loop
+            //know socket still alive
+            case SSL_ERROR_WANT_READ:
+            case SSL_ERROR_WANT_WRITE:
+                std::cout << "SSL_write needs retry\n";
+                return 2;
+
+            //-1 for failure
+            default:
+                std::cout << "SSL_write failed\n";
+                ERR_print_errors_fp(stderr);
+                return -1;
+        }
+    }
+    //success
+    return 1;
+}
+
+//decode routes with % instead of spaces
+std::string urlDecode(const std::string& encoded)
+{
+    std::string decoded;
+
+    //allocates memory upfront for effeciency
+    decoded.reserve(encoded.length());
+
+    for(int i = 0; i < encoded.length(); i++)
+    {
+        if(encoded[i] == '%')
+        {
+            //Check if there are at least 2 digits left
+            if(i + 2 < encoded.length())
+            {
+                int hexValue;
+                //gets the two hex digits after the %
+                std::istringstream hexStream(encoded.substr(i + 1, 2));
+
+                //read the hex value
+                if(hexStream >> std::hex >> hexValue)
+                {
+                    //takes the val hex val which we converted into decimal
+                    //which we then read into a char using ascii
+                    decoded += static_cast<char>(hexValue);
+                    i += 2; //skips the two chars we consumed
+                }
+                else
+                {
+                    decoded += '%'; //if parsing fails just keep the '%'
+                }
+            }
+            else
+            {
+                decoded += '%';
+            }
+        }
+        else if(encoded[i] == '+')
+        {
+            decoded += ' '; //some old encodings use '+' for space
+        }
+        else
+        {
+            decoded += encoded[i];
+        }
+    }
+
+    return decoded;
+}
+
 //Checks the mime type of the filepath
 std::string getMimeType(const std::string &filePath)
 {
-    if(filePath.find(".html") != std::string::npos) return "text/html";
-    else if(filePath.find(".css") != std::string::npos) return "text/css";
-    else if(filePath.find(".js") != std::string::npos) return "application/javascript";
-    else if(filePath.find(".png") != std::string::npos) return "image/png";
-    else if(filePath.find(".jpg") != std::string::npos || filePath.find(".jpeg") != std::string::npos) return "image/jpeg";
-    else if(filePath.find(".svg") != std::string::npos) return "image/svg+xml";
-    else if(filePath.find(".ico") != std::string::npos) return "image/x-icon";
-    //Fall back incase it's none
-    else return "text/plain";
+    // make a map of all the mime types
+    static const std::unordered_map<std::string, std::string> mimeTypes = {
+        {".html" , "text/html"},
+        {".css",  "text/css"},
+        {".js",   "application/javascript"},
+        {".png",  "image/png"},
+        {".jpg",  "image/jpeg"},
+        {".jpeg", "image/jpeg"},
+        {".svg",  "image/svg+xml"},
+        {".ico",  "image/x-icon"}
+    };
+
+    //get the position of the last '.'
+    size_t dotPos = filePath.find_last_of('.');
+    if(dotPos != std::string::npos)
+    {
+        //this will get us the mime type
+        std::string ext = filePath.substr(dotPos);
+
+        //we find the mimetype in the map and return it
+        auto it = mimeTypes.find(ext);
+        if(it != mimeTypes.end())
+        {
+            return it->second;
+        }
+    }
+
+    //default if no mime type found
+    return "text/plain";
 }
 
 //function to run server
 void runServer(SSL_CTX* ctx)
 {
     int iresult;
+    int writeStatus;
 
     /*!!!!!!IMPORTANT!!!!!!*
      * You absolutely have to pass both certificates
@@ -41,8 +209,6 @@ void runServer(SSL_CTX* ctx)
     if(SSL_CTX_use_certificate_file(ctx, "cert.pem", SSL_FILETYPE_PEM) != 1)
     {
         std::cout << "Failed to load cert.pem" << std::endl;
-        SSL_CTX_free(ctx);
-        WSACleanup();
         return;
     }
 
@@ -50,8 +216,6 @@ void runServer(SSL_CTX* ctx)
     if(SSL_CTX_use_PrivateKey_file(ctx, "key.pem", SSL_FILETYPE_PEM) != 1)
     {
         std::cout << "Failed to load key.pem" << std::endl;
-        SSL_CTX_free(ctx);
-        WSACleanup();
         return;
     }
 
@@ -64,6 +228,7 @@ void runServer(SSL_CTX* ctx)
     if(sock == INVALID_SOCKET)
     {
         std::cout << "Socket function failed with error " << WSAGetLastError() << std::endl;
+        return;
     }
     else
     {
@@ -91,7 +256,6 @@ void runServer(SSL_CTX* ctx)
     {
         std::cout << "Bind failed with error " << WSAGetLastError() << std::endl;
         closesocket(sock);
-        WSACleanup();
         return;
     }
     else
@@ -106,7 +270,6 @@ void runServer(SSL_CTX* ctx)
     {
         std::cout << "Listen failed with error " << WSAGetLastError() << std::endl;
         closesocket(sock);
-        WSACleanup();
         return;
     }
 
@@ -157,7 +320,7 @@ void runServer(SSL_CTX* ctx)
         else if(iresult == SOCKET_ERROR)
         {
             std::cout << "Select failed with error " << WSAGetLastError() << std::endl;
-            return;
+            break;
         }
 
         //adds new clients to masterlist
@@ -169,7 +332,6 @@ void runServer(SSL_CTX* ctx)
             if(acceptSock == INVALID_SOCKET)
             {
                 std::cout << "Accept failed with error " << WSAGetLastError() << std::endl;
-                WSACleanup();
                 return;
             }
 
@@ -183,8 +345,6 @@ void runServer(SSL_CTX* ctx)
                 std::cout << "SSL_set_fd failed " << std::endl;
                 closesocket(acceptSock);
                 SSL_free(ssl);
-                SSL_CTX_free(ctx);
-                WSACleanup();
                 return;
             }
 
@@ -193,6 +353,9 @@ void runServer(SSL_CTX* ctx)
             if(SSL_accept(ssl) != 1)
             {
                 std::cout << "SSL Handshake failed" << std::endl;
+                SSL_free(ssl);
+                closesocket(acceptSock);
+                continue;
             }
 
             std::cout << "SSL Handshake successful" << std::endl;
@@ -234,31 +397,169 @@ void runServer(SSL_CTX* ctx)
                     //>> skips white space so method takes method
                     //path the path and protocol the protocol
                     requestStream >> method >> path >> protocol;
-                    std::cout << "Browser requested " << path << std::endl;
+
+                    //Parse the headers from the raw request;
+                    std::unordered_map<std::string, std::string> headers = parseHeaders(rawRequest);
+
+                    std::cout << "--- Parsed Headers ---" << std::endl;
+                    if(headers.find("host") != headers.end()) 
+                    {
+                        std::cout << "Host: " << headers["host"] << std::endl;
+                    }
+                    if(headers.find("user-agent") != headers.end()) 
+                    {
+                        std::cout << "User-Agent: " << headers["user-agent"] << std::endl;
+                    }
+                    std::cout << "----------------------" << std::endl;
+
+                    std::string route = path;
+                    std::string queryStr = "";
+
+                    //We check if there is a query string aka a string
+                    //with a ? in between instead of a space
+                    size_t qMarkPos = path.find("?");
+                    if(qMarkPos != std::string::npos)
+                    {
+                        //everything before ?
+                        route = path.substr(0, qMarkPos);
+                        //everything after ?
+                        queryStr = path.substr(qMarkPos + 1);
+                    }
+
+                    std::cout << "Browser requested route: " << route << std::endl;
+                    if(!queryStr.empty())
+                    {
+                        std::cout << "With query parameters: " << queryStr << std::endl;
+                    }
+
+                    std::string decodedRoute = urlDecode(route);
 
                     std::string filePath;
                     std::string httpResponse;
-                    if(path == "/")
+                    if(method == "GET")
                     {
-                        //Go up to dist and and grab index.html
-                        filePath = "../dist/index.html";
-                    }
-                    //incase we want to display live data
-                    //coming from c++ memory
-                    else if(path == "/api/status")
-                    {
-                        std::string jsonStr = "{\"status\": \"online\", \"version\": \"1.0.0\"}";
+                        if(decodedRoute == "/")
+                        {
+                            //Go up to dist and and grab index.html
+                            filePath = "../dist/index.html";
+                        }
+                        //incase we want to display live data
+                        //coming from c++ memory
+                        else if(decodedRoute == "/api/status")
+                        {
+                            std::string jsonStr = "{\"status\": \"online\", \"version\": \"1.0.0\"}";
 
-                        httpResponse = "HTTP/1.1 200 OK\r\n"
-                                       "Content-Type: application/json\r\n"
-                                       "Content-Length: " + std::to_string(jsonStr.length()) + "\r\n"
-                                       "Connection: Close\r\n\r\n" + jsonStr;
+                            httpResponse = "HTTP/1.1 200 OK\r\n"
+                                        "Content-Type: application/json\r\n"
+                                        "Content-Length: " + std::to_string(jsonStr.length()) + "\r\n"
+                                        "Connection: Close\r\n\r\n" + jsonStr;
+                        }
+                        else
+                        {
+                            try
+                            {
+                                //Finds absolute real path to dist folder on hard drive
+                                //canonical gives us the true path to dist
+                                fs::path baseDir = fs::canonical("../dist");
+
+                                //combine baseDir with whatever the user requested
+                                fs::path requestedPath = baseDir / path.substr(1);
+
+                                //strips away any ".." and any dirs before it
+                                //This allows us to see any malicious users
+                                //true target. any "." do nothing
+                                fs::path resolvedPath = fs::weakly_canonical(requestedPath);
+
+                                //Convert both path's to strings
+                                std::string baseStr = baseDir.string();
+                                std::string resolvedStr = resolvedPath.string();
+
+                                //If the resolved path doesn't start with the base
+                                //dir then it is a malicious file
+                                //All file paths must start with the base dir
+                                //Which in this case is dist
+                                if(resolvedStr.find(baseStr) == 0)
+                                {
+                                    filePath = resolvedStr;
+                                }
+                                else
+                                {
+                                    std::cout << "WARNING: Path traversal attempt blocked for path: " << path << std::endl;
+
+                                    //clear path so file reader fails
+                                    filePath = "";
+
+                                    httpResponse = "HTTP/1.1 403 Forbidden\r\n"
+                                                "Content-Type: text/html\r\n"
+                                                "Connection: close\r\n\r\n"
+                                                "<h1>403 Forbidden</h1><p>Access denied.</p>";
+                                                
+                                    //send response to malicious user
+                                    iresult = SSL_write(it->clientSSL, httpResponse.c_str(), httpResponse.length());
+                                    writeStatus = sslWriteError(iresult, it->clientSSL, it->clientSock);
+                                    if(writeStatus == -1 || writeStatus == 0)
+                                    {   
+                                        //fatal error or clean disconnect
+                                        it = clients.erase(it);
+                                        continue;
+                                    }
+                                    else if(writeStatus == 2)
+                                    {
+                                        //retry socket. Do not erase from master list
+                                        continue;
+                                    }
+                                }
+                            }
+                            catch (const fs::filesystem_error& e) 
+                            {
+                                std::cout << "Filesystem error: " << e.what() << '\n';
+
+                                httpResponse = "HTTP/1.1 500 Internal Server Error\r\n"
+                                                "Content-Type: text/html\r\n"
+                                                "Connection: close\r\n\r\n"
+                                                "<h1>500 Internal Server Error</h1><p>An unexpected error occurred on the server.</p>";
+                                                
+                                //dir doesn't exist
+                                iresult = SSL_write(it->clientSSL, httpResponse.c_str(), httpResponse.length());
+                                writeStatus = sslWriteError(iresult, it->clientSSL, it->clientSock);
+                                if(writeStatus == -1 || writeStatus == 0)
+                                {   
+                                    //fatal error or clean disconnect
+                                    it = clients.erase(it);
+                                    continue;
+                                }
+                                else if(writeStatus == 2)
+                                {
+                                    //retry socket. Do not erase from master list
+                                    continue;
+                                }
+                            }
+                        }
                     }
                     else
                     {
-                        //Strips the starting slash so that
-                        //we can find the file locally within dist
-                        filePath = "../dist/" + path.substr(1);
+                        httpResponse = "HTTP/1.1 405 Method Not Allowed\r\n"
+                                       "Content-Type: text/html\r\n"
+                                       "Connection: close\r\n\r\n"
+                                       "<h1>405 Method Not Allowed</h1><p>An unexpected error occurred on the server.</p>";
+                        
+                        iresult = SSL_write(it->clientSSL, httpResponse.c_str(), httpResponse.length());
+                        writeStatus = sslWriteError(iresult, it->clientSSL, it->clientSock);
+                        if (writeStatus == -1 || writeStatus == 0) 
+                        {
+                            it = clients.erase(it);
+                        } 
+                        else if(writeStatus == 1 || writeStatus == 2)
+                        {
+                            // If it succeeded, we still need to close and erase 
+                            // because we don't want it falling through to the file reader
+                            SSL_shutdown(it->clientSSL);
+                            SSL_free(it->clientSSL);
+                            closesocket(it->clientSock);
+                            it = clients.erase(it);
+                        }
+                        continue; // prevents falling through logic
+                        
                     }
 
                     //Getting path result and creating
@@ -293,39 +594,22 @@ void runServer(SSL_CTX* ctx)
 
                         //send data over to client side
                         iresult = SSL_write(it->clientSSL, headers.c_str(), headers.length());
-                        if (iresult <= 0)
-                        {
-                            int err = SSL_get_error(it->clientSSL, iresult);
-
-                            switch (err)
-                            {
-                                case SSL_ERROR_ZERO_RETURN:
-                                    std::cout << "Connection closed cleanly by peer\n";
-                                    break;
-
-                                //Added since we might need to read
-                                //TLS records from peer first
-                                //either way retry needed
-                                case SSL_ERROR_WANT_READ:
-                                case SSL_ERROR_WANT_WRITE:
-                                    std::cout << "SSL_write needs retry\n";
-                                    break;
-
-                                default:
-                                    std::cout << "SSL_write failed\n";
-
-                                    ERR_print_errors_fp(stderr);
-                                    break;
-                            }
-                            SSL_shutdown(it->clientSSL);
-                            SSL_free(it->clientSSL);
-                            closesocket(it->clientSock);
+                        writeStatus = sslWriteError(iresult, it->clientSSL, it->clientSock);
+                        if(writeStatus == -1 || writeStatus == 0)
+                        {   
+                            //fatal error or clean disconnect
                             it = clients.erase(it);
+                            continue;
+                        }
+                        else if(writeStatus == 2)
+                        {
+                            //retry socket. Do not erase from master list
                             continue;
                         }
 
                         //send file in 8KB chunks
                         char buffer[8192];
+                        bool socketDied = false;
                         //attemps to read enough bytes to fill buffer
                         //OR if gcount > 0 then there is a final
                         //partial chunk of data that will be read
@@ -334,36 +618,21 @@ void runServer(SSL_CTX* ctx)
                             //send data over to client side
                             //use file.gcount to tell use exactly how many bytes were just read
                             iresult = SSL_write(it->clientSSL, buffer, file.gcount());
-                            if (iresult <= 0)
+                            writeStatus = sslWriteError(iresult, it->clientSSL, it->clientSock);
+                            if(writeStatus == -1 || writeStatus == 0) 
+                            {   
+                                socketDied = true;
+                                break; // Breaks out of the while loop not the for loop
+                            }
+                            else if(writeStatus == 2)
                             {
-                                int err = SSL_get_error(it->clientSSL, iresult);
-
-                                switch (err)
-                                {
-                                    case SSL_ERROR_ZERO_RETURN:
-                                        std::cout << "Connection closed cleanly by peer\n";
-                                        break;
-
-                                    //Added since we might need to read
-                                    //TLS records from peer first
-                                    //either way retry needed
-                                    case SSL_ERROR_WANT_READ:
-                                    case SSL_ERROR_WANT_WRITE:
-                                        std::cout << "SSL_write needs retry\n";
-                                        break;
-
-                                    default:
-                                        std::cout << "SSL_write failed\n";
-
-                                        ERR_print_errors_fp(stderr);
-                                        break;
-                                }
-                                SSL_shutdown(it->clientSSL);
-                                SSL_free(it->clientSSL);
-                                closesocket(it->clientSock);
-                                it = clients.erase(it);
                                 continue;
                             }
+                        }
+                        if (socketDied) 
+                        {
+                            it = clients.erase(it);
+                            continue;
                         }
 
                         file.close();
@@ -380,34 +649,14 @@ void runServer(SSL_CTX* ctx)
                     //make sure to convert httpResponse into a c style string or
                     //at use .data() to make it a pointer to a string of characters
                     iresult = SSL_write(it->clientSSL, httpResponse.c_str(), httpResponse.length());
-                    if (iresult <= 0)
+                    writeStatus = sslWriteError(iresult, it->clientSSL, it->clientSock);\
+                    if(writeStatus == -1 || writeStatus == 0)
                     {
-                        int err = SSL_get_error(it->clientSSL, iresult);
-
-                        switch (err)
-                        {
-                            case SSL_ERROR_ZERO_RETURN:
-                                std::cout << "Connection closed cleanly by peer\n";
-                                break;
-
-                            //Added since we might need to read
-                            //TLS records from peer first
-                            //either way retry needed
-                            case SSL_ERROR_WANT_READ:
-                            case SSL_ERROR_WANT_WRITE:
-                                std::cout << "SSL_write needs retry\n";
-                                break;
-
-                            default:
-                                std::cout << "SSL_write failed\n";
-
-                                ERR_print_errors_fp(stderr);
-                                break;
-                        }
-                        SSL_shutdown(it->clientSSL);
-                        SSL_free(it->clientSSL);
-                        closesocket(it->clientSock);
                         it = clients.erase(it);
+                        continue;
+                    }
+                    else if(writeStatus == 2)
+                    {   
                         continue;
                     }
 
@@ -464,11 +713,19 @@ void runServer(SSL_CTX* ctx)
             }
         }
     }
+
+    //Emergency cleanup loop for active sessions when exiting while(true)
+    for(auto& c : clients)
+    {
+        SSL_shutdown(c.clientSSL);
+        SSL_free(c.clientSSL);
+        closesocket(c.clientSock);
+    }
+
     iresult = closesocket(sock);
     if(iresult != 0)
     {
         std::cout << "closesocket function failed with error " << WSAGetLastError() << std::endl;
-        WSACleanup();
         return;
     }
 }
