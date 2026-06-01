@@ -7,12 +7,14 @@
 #include <filesystem>
 #include <unordered_map>
 #include <iomanip>
-#include <winsock2.h>
-#include <ws2tcpip.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-
-#pragma comment(lib, "Ws2_32.lib") 
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
@@ -185,12 +187,12 @@ void runServer(SSL_CTX* ctx)
     std::cout << "OpenSSL Context loaded succesfully with localhost certs" << std::endl;
 
     // Create SOCKET
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
     // Check for invalid socket
-    if(sock == INVALID_SOCKET)
+    if(sock == -1)
     {
-        std::cout << "Socket function failed with error " << WSAGetLastError() << std::endl;
+        std::cout << "Socket function failed with error " << strerror(errno) << std::endl;
         return;
     }
     else
@@ -202,13 +204,14 @@ void runServer(SSL_CTX* ctx)
     int opt = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
 
-    //set to nonzero for non blocking
-    u_long mode = 1;
     //this makes the socket non blocking
-    if(ioctlsocket(sock, FIONBIO, &mode) != 0)
+    //first call prevents overwriting the previous
+    //existing flags
+    int flags = fcntl(sock, F_GETFL, 0);
+    if(fcntl(sock, F_SETFL, flags | O_NONBLOCK) != 0)
     {
-        std::cout << "ioctlsocket failed with error " << WSAGetLastError() << std::endl;
-        closesocket(sock);
+        std::cout << "ioctlsocket failed with error " << strerror(errno) << std::endl;
+        close(sock);
     }
 
     //struct specifically for IPv4 to be added to bind.
@@ -230,8 +233,8 @@ void runServer(SSL_CTX* ctx)
     //Error handling
     if(iresult != 0)
     {
-        std::cout << "Bind failed with error " << WSAGetLastError() << std::endl;
-        closesocket(sock);
+        std::cout << "Bind failed with error " << strerror(errno) << std::endl;
+        close(sock);
         return;
     }
     else
@@ -244,8 +247,8 @@ void runServer(SSL_CTX* ctx)
     iresult = listen(sock, SOMAXCONN);
     if(iresult != 0)
     {
-        std::cout << "Listen failed with error " << WSAGetLastError() << std::endl;
-        closesocket(sock);
+        std::cout << "Listen failed with error " << strerror(errno) << std::endl;
+        close(sock);
         return;
     }
 
@@ -253,7 +256,7 @@ void runServer(SSL_CTX* ctx)
 
     //struct for IPv4 but for accepting socket
     sockaddr_in clientService;
-    int addrlen = sizeof(clientService);
+    socklen_t addrlen = sizeof(clientService);
 
     //holds the current state
     //of the client
@@ -267,7 +270,7 @@ void runServer(SSL_CTX* ctx)
 
     struct ClientConnection 
     {
-        SOCKET clientSock;
+        int clientSock;
         SSL* clientSSL;
         //default state
         ClientState state = STATE_HANDSHAKE;
@@ -347,9 +350,9 @@ void runServer(SSL_CTX* ctx)
         {
             std::cout << "Select succesful" << std::endl;
         }
-        else if(iresult == SOCKET_ERROR)
+        else if(iresult == -1)
         {
-            std::cout << "Select failed with error " << WSAGetLastError() << std::endl;
+            std::cout << "Select failed with error " << strerror(errno) << std::endl;
             break;
         }
 
@@ -358,21 +361,22 @@ void runServer(SSL_CTX* ctx)
         {
 
             //The socket we are accepting a connection from
-            SOCKET acceptSock = accept(sock, (sockaddr*) &clientService, &addrlen);
+            int acceptSock = accept(sock, (sockaddr*) &clientService, &addrlen);
 
-            if(acceptSock == INVALID_SOCKET)
+            if(acceptSock == -1)
             {
-                std::cout << "Accept failed with error " << WSAGetLastError() << std::endl;
+                std::cout << "Accept failed with error " << strerror(errno) << std::endl;
                 continue;
             }
 
-            //set to nonzero for non blocking
-            u_long mode = 1;
             //this makes the socket non blocking
-            if(ioctlsocket(acceptSock, FIONBIO, &mode) != 0)
+            //first call prevents overwriting the previous
+            //existing flags
+            int flags = fcntl(sock, F_GETFL, 0);
+            if(fcntl(acceptSock, F_SETFL, flags | O_NONBLOCK) != 0)
             {
-                std::cout << "ioctlsocket failed with error " << WSAGetLastError() << std::endl;
-                closesocket(acceptSock);
+                std::cout << "ioctlsocket failed with error " << strerror(errno) << std::endl;
+                close(acceptSock);
                 continue;
             }
 
@@ -384,7 +388,7 @@ void runServer(SSL_CTX* ctx)
             if(SSL_set_fd(ssl, acceptSock) != 1)
             {
                 std::cout << "SSL_set_fd failed " << std::endl;
-                closesocket(acceptSock);
+                close(acceptSock);
                 SSL_free(ssl);
                 return;
             }
@@ -404,7 +408,7 @@ void runServer(SSL_CTX* ctx)
                 std::cout << "Client timed out. Disconnecting.\n";
                 SSL_shutdown(it->clientSSL);
                 SSL_free(it->clientSSL);
-                closesocket(it->clientSock);
+                close(it->clientSock);
                 it = clients.erase(it);
                 continue;
             }
@@ -442,7 +446,7 @@ void runServer(SSL_CTX* ctx)
                 else
                 {
                     ERR_print_errors_fp(stderr);
-                    closesocket(it->clientSock);
+                    close(it->clientSock);
                     SSL_free(it->clientSSL);
                     it = clients.erase(it);
                 }
@@ -666,7 +670,7 @@ void runServer(SSL_CTX* ctx)
                     }
                     //connection closed or real error
                     SSL_free(it->clientSSL);
-                    closesocket(it->clientSock);
+                    close(it->clientSock);
                     it = clients.erase(it);
                     continue;
                 }
@@ -703,7 +707,7 @@ void runServer(SSL_CTX* ctx)
                         else
                         {
                             SSL_free(it->clientSSL);
-                            closesocket(it->clientSock);
+                            close(it->clientSock);
                             it = clients.erase(it);
                         }
                         continue;
@@ -748,7 +752,7 @@ void runServer(SSL_CTX* ctx)
                             else
                             {
                                 SSL_free(it->clientSSL);
-                                closesocket(it->clientSock);
+                                close(it->clientSock);
                                 it = clients.erase(it);
                             }
                             continue;
@@ -771,7 +775,7 @@ void runServer(SSL_CTX* ctx)
             {
                 SSL_shutdown(it->clientSSL);
                 SSL_free(it->clientSSL);
-                closesocket(it->clientSock);
+                close(it->clientSock);
                 it = clients.erase(it);
                 continue;
             }
@@ -785,44 +789,18 @@ void runServer(SSL_CTX* ctx)
     {
         SSL_shutdown(c.clientSSL);
         SSL_free(c.clientSSL);
-        closesocket(c.clientSock);
+        close(c.clientSock);
     }
 
-    iresult = closesocket(sock);
+    iresult = close(sock);
     if(iresult != 0)
     {
-        std::cout << "closesocket function failed with error " << WSAGetLastError() << std::endl;
+        std::cout << "closesocket function failed with error " << strerror(errno) << std::endl;
         return;
     }
 }
 
 int main() {
-    //start up WSA
-    WSADATA wsaData;
-    int iresult;
-
-    iresult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if(iresult != 0)
-    {
-        // if WSA failed to startup give error num
-        // temp error handler. Check docs for error type.
-        std::cout << "WSAStartup failed with error: " << iresult << std::endl;
-        return 1;
-    }
-
-    // Check the bytes to see if they match the 2.2 version
-    // If not return an error and free up space
-    if(LOBYTE(wsaData.wVersion) != 2 || HIBYTE(wsaData.wVersion) != 2)
-    {
-        std::cout << "Could not find a usable version of winsock.dll" << std::endl;
-        WSACleanup();
-        return 0;
-    }
-    else
-    {
-        std::cout << "The winsock dll 2.2 was found okay" << std::endl;
-    }
-
     //Using SSL_METHOD create SSL_CTX object
     //with which we will create all other
     //SSL objects
@@ -831,7 +809,6 @@ int main() {
     if(!ctx)
     {
         std::cout << "Failed to create SSL_CTX" << std::endl;
-        WSACleanup();
         return 0;
     }
 
@@ -844,6 +821,5 @@ int main() {
     // typically won't be called since server will be run for a while
     // however is necessary to prevent memory leaks.
     std::cout << "Yup we got it" << std::endl;
-    WSACleanup();
     return 1;
 }
