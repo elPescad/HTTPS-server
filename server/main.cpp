@@ -10,6 +10,8 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <signal.h>
+#include <sys/epoll.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -206,13 +208,36 @@ void runServer(SSL_CTX* ctx)
 
     //this makes the socket non blocking
     //first call prevents overwriting the previous
-    //existing flags
+    //existing flags. Second call sets those flags
     int flags = fcntl(sock, F_GETFL, 0);
     if(fcntl(sock, F_SETFL, flags | O_NONBLOCK) != 0)
     {
-        std::cout << "ioctlsocket failed with error " << strerror(errno) << std::endl;
+        std::cout << "fcntl failed with error " << strerror(errno) << std::endl;
         close(sock);
     }
+
+    //creates new epoll instance
+    //kernel creates an internal watch list of all I/O events
+    //which in this case is the sockets
+    int epfd = epoll_create1(0);
+    if(epfd == -1)
+    {
+        std::cout << "epoll_create1 failed: " << strerror(errno) << std::endl;
+        close(sock);
+        return;
+    }
+
+    //start monitering a specific network socket event
+    struct epoll_event ev;
+    //asks to be notified if socket has data to be read
+    //or disconnects
+    ev.events = EPOLLIN;
+    //once line above calls this hands us ev data
+    //so we know which socket has incoming data
+    ev.data.fd = sock;
+
+    //tell kernel to watch for this
+    epoll_ctl(epfd, EPOLL_CTL_ADD, sock, &ev);
 
     //struct specifically for IPv4 to be added to bind.
     sockaddr_in service;
@@ -265,7 +290,6 @@ void runServer(SSL_CTX* ctx)
         STATE_HANDSHAKE,
         STATE_READ_REQUEST,
         STATE_WRITE_RESPONSE,
-        STATE_DONE
     };
 
     struct ClientConnection 
@@ -294,111 +318,61 @@ void runServer(SSL_CTX* ctx)
     //Master list of all sockets
     std::list<ClientConnection> clients;
 
-    //Since sockets are non blocking this does NOT send
+    //translates raw file descriptor into an iterator pointing specific client's
+    //connection data stored inside a list since if we remove from the list
+    //the other elements never move in memory
+    std::unordered_map<int, std::list<ClientConnection>::iterator> fdMap;
+
+    //dynamically adjust what epoll is waiting for
+    //'[&]' means capture by reference
+    auto epollUpdate = [&](std::list<ClientConnection>::iterator it, int op)
+    {
+        struct epoll_event ev;
+        ev.data.fd = it->clientSock;
+
+        //watch for out
+        if(it->ioWantWrite)
+        {
+            ev.events = EPOLLOUT;
+        }
+        //watch for in
+        else if(it->state == STATE_HANDSHAKE || it->state == STATE_READ_REQUEST)
+        {
+            ev.events = EPOLLIN;
+        }
+        //watch for out
+        else if(it->state == STATE_WRITE_RESPONSE)
+        {
+            ev.events = EPOLLOUT;
+        }
+        //mutes socket
+        else
+        {
+            ev.events = 0;
+        }
+        //takes ev and applies to kernel
+        epoll_ctl(epfd, op, it->clientSock, &ev);
+    };
+
+    //Since the sockets are non blocking this does NOT send
     //chunks all at once. Rather it sends partial chunks.
     //This prevents other sockets from having to wait for
     //one socket to be serviced before the other is serviced.
     while(true)
     {
-
-        //The set of sockets
-        //to be read or
-        //written
-        fd_set read_set;
-        fd_set write_set;
-
-        //resets the sets
-        FD_ZERO(&read_set);
-        FD_ZERO(&write_set);
-
-        //listener wants to read new connections
-        FD_SET(sock, &read_set);
-
-        //Adds all the current master list of sockets into
-        //set
-        for(const auto& c: clients)
+        //array of 64 epoll events
+        //when sockets have data write down in this array
+        struct epoll_event events[64];
+        //puts thread to sleep so uses 0% CPU
+        int n = epoll_wait(epfd, events, 64, 1000);
+        if(n == -1)
         {
-            //openSSL may demand read/write override
-            //if so honor it
-            if(c.ioWantWrite)
-            {
-                FD_SET(c.clientSock, &write_set);
-            }
-            else
-            {
-                //flag based on architectural state
-                if(c.state == STATE_HANDSHAKE || c.state == STATE_READ_REQUEST)
-                {
-                    FD_SET(c.clientSock, &read_set);
-                }
-                if(c.state == STATE_WRITE_RESPONSE)
-                {
-                    FD_SET(c.clientSock, &write_set);
-                }
-            }
-        }
-
-        //wake up every 1 second to check timeouts
-        struct timeval tv;
-        tv.tv_sec = 1;
-        tv.tv_usec = 0;
-
-        //checks which sockets are currently active
-        //and filters down set to just those
-        iresult = select(0, &read_set, &write_set, nullptr, &tv);
-        if(iresult > 0)
-        {
-            std::cout << "Select succesful" << std::endl;
-        }
-        else if(iresult == -1)
-        {
-            std::cout << "Select failed with error " << strerror(errno) << std::endl;
+            std::cout << "epoll_wait failed " << strerror(errno) << std::endl;
             break;
         }
 
-        //adds new clients to masterlist
-        if(FD_ISSET(sock, &read_set))
-        {
-
-            //The socket we are accepting a connection from
-            int acceptSock = accept(sock, (sockaddr*) &clientService, &addrlen);
-
-            if(acceptSock == -1)
-            {
-                std::cout << "Accept failed with error " << strerror(errno) << std::endl;
-                continue;
-            }
-
-            //this makes the socket non blocking
-            //first call prevents overwriting the previous
-            //existing flags
-            int flags = fcntl(sock, F_GETFL, 0);
-            if(fcntl(acceptSock, F_SETFL, flags | O_NONBLOCK) != 0)
-            {
-                std::cout << "ioctlsocket failed with error " << strerror(errno) << std::endl;
-                close(acceptSock);
-                continue;
-            }
-
-            //Creates ssl object
-            SSL *ssl = SSL_new(ctx);
-
-            //Here we link the plaintext socket
-            //with the SSL object
-            if(SSL_set_fd(ssl, acceptSock) != 1)
-            {
-                std::cout << "SSL_set_fd failed " << std::endl;
-                close(acceptSock);
-                SSL_free(ssl);
-                return;
-            }
-
-            std::cout << "Client connected" << std::endl;
-
-            clients.push_back({acceptSock, ssl});
-        }
-
-        //handles existing clients
+        //iterates through clients and checks their last activity
+        //to prevent bot attacks or check for timeouts
         for(auto it = clients.begin(); it != clients.end();)
         {
             auto elapsed = std::chrono::steady_clock::now() - it->lastActivity;
@@ -406,14 +380,89 @@ void runServer(SSL_CTX* ctx)
             if(elapsed > timeout)
             {
                 std::cout << "Client timed out. Disconnecting.\n";
+                epoll_ctl(epfd, EPOLL_CTL_DEL, it->clientSock, nullptr);
+                fdMap.erase(it->clientSock);
                 SSL_shutdown(it->clientSSL);
                 SSL_free(it->clientSSL);
                 close(it->clientSock);
                 it = clients.erase(it);
                 continue;
             }
-            bool readyToRead = FD_ISSET(it->clientSock, &read_set);
-            bool readyToWrite = FD_ISSET(it->clientSock, &write_set);
+            ++it;
+        }
+
+        //services the 64 or less sockets
+        //if more need to be serviced we will return
+        //on the next while pass
+        for(int i = 0; i < n; i++)
+        {
+            //gets data
+            int fd = events[i].data.fd;
+
+            //if data is same as sock that means a new client
+            //is waiting to be accepted. Else it's an existing client
+            if(fd == sock)
+            {
+                //The socket we are accepting a connection from
+                int acceptSock = accept(sock, (sockaddr*) &clientService, &addrlen);
+
+                if(acceptSock == -1)
+                {
+                    std::cout << "Accept failed with error " << strerror(errno) << std::endl;
+                    continue;
+                }
+
+                //this makes the socket non blocking
+                //first call prevents overwriting the previous
+                //existing flags
+                int flags = fcntl(acceptSock, F_GETFL, 0);
+                if(fcntl(acceptSock, F_SETFL, flags | O_NONBLOCK) != 0)
+                {
+                    std::cout << "ioctlsocket failed with error " << strerror(errno) << std::endl;
+                    close(acceptSock);
+                    continue;
+                }
+
+                //Creates ssl object
+                SSL *ssl = SSL_new(ctx);
+
+                //creates socket BIO to help bridge physical network
+                //and the encrypted SSL/TLS session
+                if(SSL_set_fd(ssl, acceptSock) != 1)
+                {
+                    std::cout << "SSL_set_fd failed" << std::endl;
+                    SSL_free(ssl);
+                    close(acceptSock);
+                    continue;
+                }
+
+                //add new clients to clients
+                clients.push_back({acceptSock, ssl});
+                //get a pointer to new client we just added
+                auto newIt = std::prev(clients.end());
+                //map the raw socket num to the pointer
+                fdMap[acceptSock] = newIt;
+
+                //watch this new socket
+                struct epoll_event ev;
+                ev.events = EPOLLIN;
+                ev.data.fd = acceptSock;
+                epoll_ctl(epfd, EPOLL_CTL_ADD, acceptSock, &ev);
+                continue;
+            }
+
+            //if fd not sock then find what fd is
+            auto mapIt = fdMap.find(fd);
+            if(mapIt == fdMap.end())
+            {
+                continue;
+            }
+            //gets data of it
+            auto it = mapIt->second;
+
+            //use bitwise operators to check for read and write
+            bool readyToRead = events[i].events & EPOLLIN;
+            bool readyToWrite = events[i].events & EPOLLOUT;
 
             //state handshake
             if(it->state == STATE_HANDSHAKE && (readyToRead || readyToWrite))
@@ -425,7 +474,7 @@ void runServer(SSL_CTX* ctx)
                     it->state = STATE_READ_REQUEST;
                     it->ioWantWrite = false;
                     it->lastActivity = std::chrono::steady_clock::now();
-                    ++it;
+                    epollUpdate(it, EPOLL_CTL_MOD);
                     continue;
                 }
 
@@ -434,13 +483,13 @@ void runServer(SSL_CTX* ctx)
                 if(err == SSL_ERROR_WANT_READ)
                 {
                     it->ioWantWrite = false;
-                    ++it;
+                    epollUpdate(it, EPOLL_CTL_MOD);
                 }
                 //socket already accepted earlier wait for write
                 else if(err == SSL_ERROR_WANT_WRITE)
                 {
                     it->ioWantWrite = true;
-                    ++it;
+                    epollUpdate(it, EPOLL_CTL_MOD);
                 }
                 //actual error
                 else
@@ -448,15 +497,14 @@ void runServer(SSL_CTX* ctx)
                     ERR_print_errors_fp(stderr);
                     close(it->clientSock);
                     SSL_free(it->clientSSL);
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, it->clientSock, nullptr);
+                    fdMap.erase(it->clientSock);
                     it = clients.erase(it);
                 }
                 continue;
-            }
+            }            
 
-            //accumulate into readbuffer until we have a full request
-            //then parse, build writeBuffer, and transition.
-            //WE NEVER WRITE HERE
-            if(it->state == STATE_READ_REQUEST && readyToRead)
+           if(it->state == STATE_READ_REQUEST && readyToRead)
             {
                 //buffer so that ram isn't overloaded
                 //essentially makes it so we can only 
@@ -491,14 +539,13 @@ void runServer(SSL_CTX* ctx)
 
                         it->writeOffset = 0;
                         it->state = STATE_WRITE_RESPONSE;
-                        ++it;
+                        epollUpdate(it, EPOLL_CTL_MOD);
                         continue;
                     }
 
                     //checks to see if we have full header block
                     if(it->readBuffer.find("\r\n\r\n") == std::string::npos)
                     {
-                        ++it;
                         continue; //if not come back next select() iteration
                     }
                     //pointes to the first byte of this new string in memory
@@ -657,7 +704,7 @@ void runServer(SSL_CTX* ctx)
                     it->writeOffset = 0;
                     it->lastActivity = std::chrono::steady_clock::now();
                     it->state = STATE_WRITE_RESPONSE;
-                    ++it;
+                    epollUpdate(it, EPOLL_CTL_MOD);
                     continue;
                 }
                 else
@@ -665,11 +712,12 @@ void runServer(SSL_CTX* ctx)
                     int err = SSL_get_error(it->clientSSL, iresult);
                     if(err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
                     {
-                        ++it; //retry next time
                         continue;
                     }
                     //connection closed or real error
                     SSL_free(it->clientSSL);
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, it->clientSock, nullptr);
+                    fdMap.erase(it->clientSock);
                     close(it->clientSock);
                     it = clients.erase(it);
                     continue;
@@ -702,11 +750,13 @@ void runServer(SSL_CTX* ctx)
                         if(err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ)
                         {
                             it->ioWantWrite = true;
-                            ++it;
+                            epollUpdate(it, EPOLL_CTL_MOD);
                         }
                         else
                         {
                             SSL_free(it->clientSSL);
+                            epoll_ctl(epfd, EPOLL_CTL_DEL, it->clientSock, nullptr);
+                            fdMap.erase(it->clientSock);
                             close(it->clientSock);
                             it = clients.erase(it);
                         }
@@ -738,6 +788,7 @@ void runServer(SSL_CTX* ctx)
                                 it->fileStream.seekg(iresult - bytesRead, std::ios::cur);
                                 it->fileBytesLeft += (bytesRead - iresult);
                                 it->ioWantWrite = true;
+                                epollUpdate(it, EPOLL_CTL_MOD);
                             }
                         }
                         else
@@ -747,11 +798,13 @@ void runServer(SSL_CTX* ctx)
                             {
                                 it->fileStream.seekg(-bytesRead, std::ios::cur);
                                 it->ioWantWrite = true;
-                                ++it;
+                                epollUpdate(it, EPOLL_CTL_MOD);
                             }
                             else
                             {
                                 SSL_free(it->clientSSL);
+                                epoll_ctl(epfd, EPOLL_CTL_DEL, it->clientSock, nullptr);
+                                fdMap.erase(it->clientSock);
                                 close(it->clientSock);
                                 it = clients.erase(it);
                             }
@@ -761,26 +814,17 @@ void runServer(SSL_CTX* ctx)
                     //Stay in write response until all file bytes are gone
                     if(it->fileBytesLeft > 0)
                     {
-                        ++it;
                         continue;
                     }
                 }
-                it->state = STATE_DONE;
-                ++it;
-                continue;
-            }
-
-            //handle done
-            if(it->state == STATE_DONE)
-            {
                 SSL_shutdown(it->clientSSL);
                 SSL_free(it->clientSSL);
+                epoll_ctl(epfd, EPOLL_CTL_DEL, it->clientSock, nullptr);
+                fdMap.erase(it->clientSock);
                 close(it->clientSock);
-                it = clients.erase(it);
+                clients.erase(it);
                 continue;
             }
-
-            ++it; //socket not ready yet move on
         }       
     }
 
@@ -813,13 +857,13 @@ int main() {
     }
 
     std::cout << "Starting server" << std::endl;
+    signal(SIGPIPE, SIG_IGN);
     runServer(ctx);
 
     //Close SSL_CTX global var
     SSL_CTX_free(ctx);
 
     // typically won't be called since server will be run for a while
-    // however is necessary to prevent memory leaks.
     std::cout << "Yup we got it" << std::endl;
     return 1;
 }
