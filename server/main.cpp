@@ -546,7 +546,7 @@ void runServer(SSL_CTX* ctx)
                     //checks to see if we have full header block
                     if(it->readBuffer.find("\r\n\r\n") == std::string::npos)
                     {
-                        continue; //if not come back next select() iteration
+                        continue; //if not come back next epoll_wait() iteration
                     }
                     //pointes to the first byte of this new string in memory
                     std::istringstream requestStream(it->readBuffer);
