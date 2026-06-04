@@ -1,73 +1,17 @@
-# React + TypeScript + Vite
+# Dual-Platform Asynchronous HTTPS C10k Server Core
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A deep-dive exploration into low-level systems programming, asynchronous network I/O, and cryptographic state tracking. This project consists of two distinct, from-scratch implementations of a high-concurrency HTTPS/1.1 server tailored for Windows (Winsock2) and Linux (POSIX BSD Sockets), utilizing raw OpenSSL for non-blocking TLS termination.
 
-Currently, two official plugins are available:
+The goal of this project is to implement a robust, secure, single-threaded asynchronous state machine capable of scaling toward the C10k bottleneck without relying on high-level abstractions like Node.js, Go, or Rust's Tokio.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Architecture Index
 
-## React Compiler
+This repository is split across dedicated branches to isolate operating system paradigms and kernel-level event APIs:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+* **[Linuxserver](https://github.com/elPescad/HTTPS-server/blob/feat/Linux-Server/server/main.cpp)**
+* **[Windows Server](https://github.com/elPescad/HTTPS-server/blob/feat/Windows-server/server/main.cpp)**
 
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
-
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+Regardless of the underlying OS flavor, both implementations enforce strict production-grade security constraints written purely in modern C++:
+* **Directory Traversal Protection:** Mitigation of `../` attacks via compile-time and runtime filesystem resolution using `std::filesystem::canonical`.
+* **DoS Mitigation:** Strict 8KB buffer limits on HTTP request headers to prevent memory exhaustion attacks, gracefully failing with an HTTP `431 Request Header Fields Too Large` response.
+* **Hardened HTTP Headers:** Native injection of security headers including HTTP Strict Transport Security (HSTS), `X-Content-Type-Options: nosniff`, and `X-Frame-Options: DENY`.
