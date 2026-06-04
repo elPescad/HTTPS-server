@@ -15,3 +15,42 @@ Regardless of the underlying OS flavor, both implementations enforce strict prod
 * **Directory Traversal Protection:** Mitigation of `../` attacks via compile-time and runtime filesystem resolution using `std::filesystem::canonical`.
 * **DoS Mitigation:** Strict 8KB buffer limits on HTTP request headers to prevent memory exhaustion attacks, gracefully failing with an HTTP `431 Request Header Fields Too Large` response.
 * **Hardened HTTP Headers:** Native injection of security headers including HTTP Strict Transport Security (HSTS), `X-Content-Type-Options: nosniff`, and `X-Frame-Options: DENY`.
+
+# (WINDOWS BRANCH) Asynchronous Windows HTTPS Server (Winsock2 + OpenSSL)
+
+This branch contains the Windows-native implementation of my high-concurrency HTTPS server. Built directly on top of the Winsock2 API and OpenSSL, this server manages multiplexed network connections through a single-threaded, non-blocking asynchronous state machine.
+
+##  Technical Deep-Dive & Architecture
+
+### 1. Non-Blocking TLS State Machine
+Traditional blocking sockets stall the execution thread while waiting for network I/O. This implementation forces all client sockets into non-blocking mode, handling OpenSSL's volatile `SSL_ERROR_WANT_READ` and `SSL_ERROR_WANT_WRITE` signals seamlessly. The connection life cycle transitions through an explicit state machine:
+`STATE_READ_REQUEST` -> `STATE_WRITE_RESPONSE` -> `STATE_DONE`
+
+### 2. High-Precision Flow Control & Buffer Rollback
+One of the primary challenges of asynchronous TLS writing is that `SSL_write` may not consume an entire file buffer if the kernel's network window fills up. This implementation solves that via precision stream seeking:
+* Tracks exact bytes consumed by OpenSSL per loop iteration.
+* Automatically calculates partial writes and rolls back the `std::ifstream` file pointer using `seekg()` relative to the unread delta.
+* Resumes streaming seamlessly on subsequent event loop ticks without data corruption.
+
+### 3. Memory-Cap Buffering
+To maintain low RAM overhead, incoming socket data is drained in small 1024-byte chunks per loop iteration into a persistent session `readBuffer`, ensuring the server cannot be crashed by large, malformed network payloads.
+
+## Future Roadmap: The C10k Leap
+The current iteration utilizes the multiplexed `select()` API for socket polling. While functionally robust, `select()` suffers from $O(N)$ linear scanning scaling limitations and a default Windows `FD_SETSIZE` cap. 
+* **Next Phase:** Upgrade the event loop architecture from `select()` to Windows **IOCP (I/O Completion Ports)** to achieve true $O(1)$ kernel-level event notification and master the C10k concurrency limit.
+
+# (LINUX BRANCH) Asynchronous Linux HTTPS Server (POSIX + OpenSSL)
+
+This branch contains the Linux-native counter-part of the high-concurrency HTTPS project, leveraging standard POSIX BSD sockets, non-blocking file descriptors, and OpenSSL. It mirrors the exact logical state machine of the Windows counterpart but conforms entirely to Unix-system paradigms.
+
+## Technical Deep-Dive & Architecture
+
+### 1. POSIX Signal and File Descriptor Management
+* Employs non-blocking socket configuration via `fcntl(fd, F_SETFL, O_NONBLOCK)`.
+* Ensures structural durability by ignoring `SIGPIPE` signals, preventing the server process from crashing when a remote client abruptly severs a TLS session during active transmission.
+
+### 2. Symmetrical OpenSSL Pipeline
+Maintains identical logical parity with the Windows implementation’s non-blocking cryptographic architecture. It handles asynchronous TLS handshakes and partial data writes by accurately responding to OpenSSL’s event-driven error codes on a single execution thread.
+
+## Future Roadmap: The C10k Leap
+* **Next Phase:** Transition the current polling infrastructure to native Linux **Edge-Triggered `epoll`**. By shifting from linear descriptor arrays to a kernel-level event readiness queue, the Linux implementation will fully realize its C10k capabilities, handling tens of thousands of simultaneous connections with minimal CPU overhead.
