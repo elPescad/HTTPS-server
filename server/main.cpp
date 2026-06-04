@@ -214,6 +214,7 @@ void runServer(SSL_CTX* ctx)
     {
         std::cout << "fcntl failed with error " << strerror(errno) << std::endl;
         close(sock);
+        return;
     }
 
     //creates new epoll instance
@@ -418,7 +419,7 @@ void runServer(SSL_CTX* ctx)
                 int flags = fcntl(acceptSock, F_GETFL, 0);
                 if(fcntl(acceptSock, F_SETFL, flags | O_NONBLOCK) != 0)
                 {
-                    std::cout << "ioctlsocket failed with error " << strerror(errno) << std::endl;
+                    std::cout << "fcntl failed with error " << strerror(errno) << std::endl;
                     close(acceptSock);
                     continue;
                 }
