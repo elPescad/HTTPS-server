@@ -8,7 +8,7 @@ The goal of this project is to implement a robust, secure, single-threaded async
 
 This repository is split across dedicated branches to isolate operating system paradigms and kernel-level event APIs:
 
-* **[Linuxserver](https://github.com/elPescad/HTTPS-server/blob/feat/Linux-Server/server/main.cpp)**
+* **[Linux Server](https://github.com/elPescad/HTTPS-server/blob/feat/Linux-Server/server/main.cpp)**
 * **[Windows Server](https://github.com/elPescad/HTTPS-server/blob/feat/Windows-server/server/main.cpp)**
 
 Regardless of the underlying OS flavor, both implementations enforce strict production-grade security constraints written purely in modern C++:
