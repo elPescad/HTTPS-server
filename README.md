@@ -35,6 +35,15 @@ One of the primary challenges of asynchronous TLS writing is that `SSL_write` ma
 ### 3. Memory-Cap Buffering
 To maintain low RAM overhead, incoming socket data is drained in small 1024-byte chunks per loop iteration into a persistent session `readBuffer`, ensuring the server cannot be crashed by large, malformed network payloads.
 
+### 4. Local Testing
+```bash
+# Compile with Winsock2 and OpenSSL linking
+g++ main.cpp -o my_server -lws2_32 -lssl -lcrypto
+
+# Run the server
+./my_server.exe
+```
+
 ## Future Roadmap: The C10k Leap
 The current iteration utilizes the multiplexed `select()` API for socket polling. While functionally robust, `select()` suffers from $O(N)$ linear scanning scaling limitations and a default Windows `FD_SETSIZE` cap. 
 * **Next Phase:** Upgrade the event loop architecture from `select()` to Windows **IOCP (I/O Completion Ports)** to achieve true $O(1)$ kernel-level event notification and master the C10k concurrency limit.
@@ -51,6 +60,15 @@ This branch contains the Linux-native counter-part of the high-concurrency HTTPS
 
 ### 2. Symmetrical OpenSSL Pipeline
 Maintains identical logical parity with the Windows implementation’s non-blocking cryptographic architecture. It handles asynchronous TLS handshakes and partial data writes by accurately responding to OpenSSL’s event-driven error codes on a single execution thread.
+
+### 3. Local Testing
+```bash
+# Compile with C++17 standard and OpenSSL linking
+g++ -std=c++17 main.cpp -o server -lssl -lcrypto
+
+# Run the server
+./server
+```
 
 ## Future Roadmap: The C10k Leap
 * **Next Phase:** Transition the current polling infrastructure to native Linux **Edge-Triggered `epoll`**. By shifting from linear descriptor arrays to a kernel-level event readiness queue, the Linux implementation will fully realize its C10k capabilities, handling tens of thousands of simultaneous connections with minimal CPU overhead.
