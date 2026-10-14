@@ -16,6 +16,17 @@ Regardless of the underlying OS flavor, both implementations enforce strict prod
 * **DoS Mitigation:** Strict 8KB buffer limits on HTTP request headers to prevent memory exhaustion attacks, gracefully failing with an HTTP `431 Request Header Fields Too Large` response.
 * **Hardened HTTP Headers:** Native injection of security headers including HTTP Strict Transport Security (HSTS), `X-Content-Type-Options: nosniff`, and `X-Frame-Options: DENY`.
 
+## Known Issues
+
+A later review of both builds found 36 bugs that aren't fixed yet. Each one is documented in **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** with its root cause, reproduction steps and a planned fix, and tagged in the source as `KNOWN BUG #N`. The most significant:
+
+* **#1, #2: One malformed request can crash the server.** A request for a directory, or a request line with no path, throws an exception that is never caught.
+* **#3: Requests with more than 1 KB of headers hang.** OpenSSL keeps the rest of the decrypted TLS record in its own buffer, so the socket never becomes readable again and the request times out.
+* **#4: One client's OpenSSL error can kill other clients' connections.** OpenSSL's per-thread error queue is never cleared, so a harmless `WANT_READ` on a healthy connection is treated as fatal.
+* **#9: Path traversal through a sibling directory.** The `dist/` check compares strings, not path components, so `../dist-secret/` passes it.
+* **#25: The Windows build polls at most 64 sockets.** `FD_SETSIZE` defaults to 64, and the extra clients are silently never polled.
+* **#28, #29: The main C10k blockers.** Every request pays for a full RSA-4096 TLS handshake (`Connection: close`), and every wakeup scans every connection for timeouts.
+
 # (WINDOWS BRANCH) Asynchronous Windows HTTPS Server (Winsock2 + OpenSSL)
 
 This branch contains the Windows-native implementation of my high-concurrency HTTPS server. Built directly on top of the Winsock2 API and OpenSSL, this server manages multiplexed network connections through a single-threaded, non-blocking asynchronous state machine.
