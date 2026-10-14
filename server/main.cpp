@@ -22,6 +22,9 @@ namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
 
+//KNOWN BUG #N comments below mark bugs found in a later review (not fixed yet).
+//Each one is explained, with repro steps and a fix, in KNOWN_ISSUES.md.
+
 //trims white space from both sides of string
 std::string trim(const std::string& str)
 {
@@ -64,6 +67,8 @@ std::unordered_map<std::string, std::string> parseHeaders(const std::string& raw
             std::string value = line.substr(colonPos + 1);
 
             //convert key to lowercase for case insensitive lookups
+            //KNOWN BUG #23: std::tolower is undefined for negative values and plain char
+            //is signed on x86, so a header byte >= 0x80 is UB. Cast to unsigned char first.
             for(char& c : key) c = std::tolower(c);
 
             headers[key] = trim(value);
@@ -90,6 +95,9 @@ std::string urlDecode(const std::string& encoded)
             //Check if there are at least 2 digits left
             if(i + 2 < encoded.length())
             {
+                //KNOWN BUG #11: >> std::hex accepts a sign and stops at the first non-hex char,
+                //so "%4G", "%-1" and "%+1" decode instead of failing, and "%00"
+                //puts a NUL in the path (the syscalls then cut the path short there).
                 int hexValue;
                 //gets the two hex digits after the %
                 std::istringstream hexStream(encoded.substr(i + 1, 2));
@@ -112,6 +120,8 @@ std::string urlDecode(const std::string& encoded)
                 decoded += '%';
             }
         }
+        //KNOWN BUG #11: '+' means space only in form-encoded query strings, not in
+        //paths, so a plain link to "a+b.txt" looks for "a b.txt" and 404s (only %2B works).
         else if(encoded[i] == '+')
         {
             decoded += ' '; //some old encodings use '+' for space
@@ -180,6 +190,9 @@ void runServer(SSL_CTX* ctx)
     }
 
     //load the certificate onto the ctx
+    //KNOWN BUG #16: key.pem is committed to the repo.
+    //KNOWN BUG #28: the key is RSA-4096; signing with it (done in every full, non-resumed
+    //handshake) is over 150x slower than with an ECDSA P-256 key.
     if(SSL_CTX_use_PrivateKey_file(ctx, "key.pem", SSL_FILETYPE_PEM) != 1)
     {
         std::cout << "Failed to load key.pem" << std::endl;
@@ -204,6 +217,7 @@ void runServer(SSL_CTX* ctx)
     
     //allows socket to bind to address that is in the TIME_WAIT state
     int opt = 1;
+    //KNOWN BUG #35: return value unchecked (so are fcntl F_GETFL and every epoll_ctl)
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
 
     //this makes the socket non blocking
@@ -241,6 +255,7 @@ void runServer(SSL_CTX* ctx)
     epoll_ctl(epfd, EPOLL_CTL_ADD, sock, &ev);
 
     //struct specifically for IPv4 to be added to bind.
+    //KNOWN BUG #35: not zero-initialized, so sin_zero is stack garbage (use service{})
     sockaddr_in service;
 
     //specifies IPv4 protocol
@@ -359,6 +374,7 @@ void runServer(SSL_CTX* ctx)
     //chunks all at once. Rather it sends partial chunks.
     //This prevents other sockets from having to wait for
     //one socket to be serviced before the other is serviced.
+    //KNOWN BUG #32: one thread runs everything, so the server only uses one core.
     while(true)
     {
         //array of 64 epoll events
@@ -366,6 +382,9 @@ void runServer(SSL_CTX* ctx)
         struct epoll_event events[64];
         //puts thread to sleep so uses 0% CPU
         int n = epoll_wait(epfd, events, 64, 1000);
+        //KNOWN BUG #6: after a stop and continue (Ctrl-Z then fg, or kill -STOP/-CONT)
+        //epoll_wait fails with EINTR, which isn't a real error, but the break below
+        //shuts the server down.
         if(n == -1)
         {
             std::cout << "epoll_wait failed " << strerror(errno) << std::endl;
@@ -374,15 +393,25 @@ void runServer(SSL_CTX* ctx)
 
         //iterates through clients and checks their last activity
         //to prevent bot attacks or check for timeouts
+        //KNOWN BUG #29: walks every client on every wakeup, so each event costs O(N)
+        //and cancels out epoll's O(ready). Use a list ordered by activity or a timer wheel.
+        //KNOWN BUG #24: reaping before the events below are handled frees fds that
+        //accept() can reuse while a stale event for the old fd is still in events[].
         for(auto it = clients.begin(); it != clients.end();)
         {
             auto elapsed = std::chrono::steady_clock::now() - it->lastActivity;
+            //KNOWN BUG #12: lastActivity resets on every read, so this is a sliding idle
+            //timer; a client sending 1 byte every few seconds is never timed out (slowloris).
             auto timeout = (it->state == STATE_WRITE_RESPONSE) ? 60s : 10s;
             if(elapsed > timeout)
             {
                 std::cout << "Client timed out. Disconnecting.\n";
                 epoll_ctl(epfd, EPOLL_CTL_DEL, it->clientSock, nullptr);
                 fdMap.erase(it->clientSock);
+                //KNOWN BUG #4: on a client that never finished the handshake this leaves an
+                //error in OpenSSL's per-thread error queue that the code never clears (only the
+                //next SSL_accept does), so a connection already past its handshake can have a
+                //normal WANT_READ misread as fatal. Call ERR_clear_error() before SSL calls.
                 SSL_shutdown(it->clientSSL);
                 SSL_free(it->clientSSL);
                 close(it->clientSock);
@@ -405,10 +434,14 @@ void runServer(SSL_CTX* ctx)
             if(fd == sock)
             {
                 //The socket we are accepting a connection from
+                //KNOWN BUG #33: one accept per wakeup, plus two fcntl calls below; loop
+                //accept4(SOCK_NONBLOCK | SOCK_CLOEXEC) until EAGAIN instead.
                 int acceptSock = accept(sock, (sockaddr*) &clientService, &addrlen);
 
                 if(acceptSock == -1)
                 {
+                    //KNOWN BUG #7: on EMFILE the connection stays queued, the listener stays
+                    //readable, and level-triggered epoll spins through here at 100% CPU.
                     std::cout << "Accept failed with error " << strerror(errno) << std::endl;
                     continue;
                 }
@@ -425,6 +458,7 @@ void runServer(SSL_CTX* ctx)
                 }
 
                 //Creates ssl object
+                //KNOWN BUG #26: SSL_new's result is never checked for NULL
                 SSL *ssl = SSL_new(ctx);
 
                 //creates socket BIO to help bridge physical network
@@ -438,6 +472,7 @@ void runServer(SSL_CTX* ctx)
                 }
 
                 //add new clients to clients
+                //KNOWN BUG #13: no cap on concurrent connections (each TLS one costs ~25 KB)
                 clients.push_back({acceptSock, ssl});
                 //get a pointer to new client we just added
                 auto newIt = std::prev(clients.end());
@@ -496,6 +531,8 @@ void runServer(SSL_CTX* ctx)
                 else
                 {
                     ERR_print_errors_fp(stderr);
+                    //KNOWN BUG #35: close() runs before EPOLL_CTL_DEL below, so the DEL fails with
+                    //EBADF (harmless only because closing already removed the fd from epoll)
                     close(it->clientSock);
                     SSL_free(it->clientSSL);
                     epoll_ctl(epfd, EPOLL_CTL_DEL, it->clientSock, nullptr);
@@ -513,9 +550,15 @@ void runServer(SSL_CTX* ctx)
                 //if more needed we can loop
                 //This prevents crashes or from using
                 //too much memory.
+                //KNOWN BUG #3: OpenSSL decrypts a whole TLS record (up to 16 KB) but hands back
+                //only 1024 bytes; the rest waits in SSL_pending(), the kernel buffer is empty,
+                //so epoll never fires again and >1 KB of headers hangs until the timeout.
+                //Fix: keep calling SSL_read until it returns WANT_READ.
                 char buffer[1024];
 
                 //recieves the incoming data from the client
+                //KNOWN BUG #4: no ERR_clear_error() first, so another connection's leftover
+                //error turns a normal WANT_READ into SSL_ERROR_SSL and this client is dropped
                 iresult = SSL_read(it->clientSSL, buffer, sizeof(buffer));
                 //data is recieved in bytes so if multiple bytes
                 //there is data
@@ -557,10 +600,14 @@ void runServer(SSL_CTX* ctx)
 
                     //>> skips white space so method takes method
                     //path the path and protocol the protocol
+                    //KNOWN BUG #2: with no request target ("GET\r\n\r\n") path stays empty and
+                    //substr(1) below throws std::out_of_range, which nothing catches
                     requestStream >> method >> path >> protocol;
 
                     //Parse the headers from the raw request;
                     auto parsedHeaders = parseHeaders(it->readBuffer);
+                    //KNOWN BUG #34: std::endl flushes, so every log line is a blocking write()
+                    //on the event-loop thread
                     std::cout << "--- Parsed Headers ---" << std::endl;
                     if(parsedHeaders.count("host")) 
                     {
@@ -626,6 +673,8 @@ void runServer(SSL_CTX* ctx)
                                 //Get true path
                                 fs::path baseDir = fs::canonical("../dist");
                                 //add paths to get requested route
+                                //KNOWN BUG #2: assumes the route starts with '/': "" throws out_of_range here
+                                //and "x" becomes "", which resolves to dist/ itself and crashes via #1
                                 fs::path requested = baseDir / decodedRoute.substr(1);
                                 //removes any .. and . and shifts dirs accordingly
                                 fs::path resolved = fs::weakly_canonical(requested);
@@ -634,6 +683,8 @@ void runServer(SSL_CTX* ctx)
                                 std::string resolvedStr = resolved.string();
 
                                 //if the path starts with /dist then continue
+                                //KNOWN BUG #9: string prefix, not a path check: ".../dist-secret" also starts
+                                //with ".../dist". Compare path components (or use openat2 RESOLVE_BENEATH).
                                 if(resolvedStr.find(baseStr) == 0)
                                 {
                                     filePath = resolvedStr;
@@ -651,6 +702,8 @@ void runServer(SSL_CTX* ctx)
                                                       "X-Frame-Options: DENY\r\n\r\n" + body;
                                 }
                             }
+                            //KNOWN BUG #2: only filesystem_error is caught, so std::out_of_range from
+                            //substr(1) above escapes to std::terminate
                             catch(const fs::filesystem_error& e)
                             {
 
@@ -669,14 +722,23 @@ void runServer(SSL_CTX* ctx)
                         //Try to open file only if we have a valid path and no error yet
                         if(!filePath.empty() && it->writeBuffer.empty())
                         {
+                            //KNOWN BUG #1: on Linux ifstream opens a directory without complaint, then
+                            //fs::file_size below throws outside any try -> std::terminate (GET /assets)
+                            //KNOWN BUG #31: this open(), fs::file_size() and the reads in the write state
+                            //are blocking disk I/O on the event-loop thread
                             it->fileStream.open(filePath, std::ios::binary);
                             if(it->fileStream.is_open())
                             {
+                                //KNOWN BUG #20 / #8: size is read once, by path; if the file grows the body
+                                //overruns Content-Length, if it shrinks the write loop below spins
                                 it->fileBytesLeft = fs::file_size(filePath);
                                 std::string mime = getMimeType(filePath);
 
                                 //writeBuffer holds only the https headers
                                 //the body comes from fileStream in STATE_WRITE_RESPONSE
+                                //KNOWN BUG #28: Connection: close means every request (every image, script...)
+                                //pays for a new TCP connection and a new TLS handshake (a full RSA-4096 one
+                                //unless the client resumes a session)
                                 it->writeBuffer = "HTTP/1.1 200 OK\r\n"
                                                   "Content-Type: " + mime + "\r\n"
                                                   "Content-Length: " + std::to_string(it->fileBytesLeft) + "\r\n"
@@ -687,6 +749,9 @@ void runServer(SSL_CTX* ctx)
                             }
                             else
                             {
+                                //KNOWN BUG #10: reflects the URL and the absolute server path into HTML
+                                //unescaped (reflected XSS).
+                                //KNOWN BUG #22: EMFILE/EACCES also end up here as 404.
                                 std::string body = "<h1>404 Not Found</h1><p>'" + filePath + "' does not exist.</p>";
                                 it->writeBuffer = "HTTP/1.1 404 Not Found\r\n"
                                                   "Content-Type: text/html\r\n"
@@ -711,10 +776,13 @@ void runServer(SSL_CTX* ctx)
                 else
                 {
                     int err = SSL_get_error(it->clientSSL, iresult);
+                    //KNOWN BUG #18: WANT_WRITE needs EPOLLOUT, but this keeps waiting for EPOLLIN
                     if(err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
                     {
                         continue;
                     }
+                    //KNOWN BUG #4: a client that closes without close_notify leaves "unexpected
+                    //eof while reading" in the error queue here, and the code never clears it
                     //connection closed or real error
                     SSL_free(it->clientSSL);
                     epoll_ctl(epfd, EPOLL_CTL_DEL, it->clientSock, nullptr);
@@ -748,6 +816,8 @@ void runServer(SSL_CTX* ctx)
                     else
                     {
                         int err = SSL_get_error(it->clientSSL, iresult);
+                        //KNOWN BUG #17: WANT_READ should wait for EPOLLIN; waiting for EPOLLOUT on a
+                        //socket that is almost always writable would spin
                         if(err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ)
                         {
                             it->ioWantWrite = true;
@@ -768,8 +838,12 @@ void runServer(SSL_CTX* ctx)
                 //stream file body if there is one
                 if(it->fileStream.is_open() && it->fileBytesLeft > 0)
                 {
+                    //KNOWN BUG #19: a WANT_WRITE retry must pass the same pointer and length; that
+                    //only holds because fileBuf lands at the same stack address every time
+                    //KNOWN BUG #30: one 8 KB chunk per epoll_wait (a 20 MB file = ~2,450 wakeups)
                     char fileBuf[8192];
                     //attempts to read all bytes
+                    //KNOWN BUG #20: should read min(8192, fileBytesLeft)
                     it->fileStream.read(fileBuf, sizeof(fileBuf));
                     std::streamsize bytesRead = it->fileStream.gcount();
 
@@ -784,6 +858,8 @@ void runServer(SSL_CTX* ctx)
 
                             //if SSL didnt' consume all bytes we read, seek back
                             //so we re-send the remainder next iteration
+                            //KNOWN BUG #19: dead code; without SSL_MODE_ENABLE_PARTIAL_WRITE, SSL_write
+                            //returns all of the bytes or an error, never a partial count
                             if(iresult < bytesRead)
                             {
                                 it->fileStream.seekg(iresult - bytesRead, std::ios::cur);
@@ -795,8 +871,11 @@ void runServer(SSL_CTX* ctx)
                         else
                         {
                             int err = SSL_get_error(it->clientSSL, iresult);
+                            //KNOWN BUG #17: same wrong-direction wait for WANT_READ as above
                             if(err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ)
                             {
+                                //KNOWN BUG #5: a short final read sets failbit, so this seekg does nothing,
+                                //the retry reads 0 bytes, the tail is never sent and the loop spins
                                 it->fileStream.seekg(-bytesRead, std::ios::cur);
                                 it->ioWantWrite = true;
                                 epollUpdate(it, EPOLL_CTL_MOD);
@@ -813,11 +892,15 @@ void runServer(SSL_CTX* ctx)
                         }
                     }
                     //Stay in write response until all file bytes are gone
+                    //KNOWN BUG #8 / #5: if read() returned 0 (file shrank, or the failed seekg),
+                    //fileBytesLeft never hits 0 and level-triggered EPOLLOUT spins here at 100% CPU
                     if(it->fileBytesLeft > 0)
                     {
                         continue;
                     }
                 }
+                //KNOWN BUG #21: one non-blocking SSL_shutdown, never retried, then close();
+                //unread data in the receive queue makes Linux send RST instead of FIN
                 SSL_shutdown(it->clientSSL);
                 SSL_free(it->clientSSL);
                 epoll_ctl(epfd, EPOLL_CTL_DEL, it->clientSock, nullptr);
@@ -849,11 +932,14 @@ int main() {
     //Using SSL_METHOD create SSL_CTX object
     //with which we will create all other
     //SSL objects
+    //KNOWN BUG #14: no SSL_CTX_set_min_proto_version or cipher list, so the TLS
+    //floor comes from whatever OpenSSL / openssl.cnf is installed
     const SSL_METHOD *method = TLS_server_method();
     SSL_CTX *ctx = SSL_CTX_new(method);
     if(!ctx)
     {
         std::cout << "Failed to create SSL_CTX" << std::endl;
+        //KNOWN BUG #36: this failure returns 0 (success), and the end of main returns 1
         return 0;
     }
 
