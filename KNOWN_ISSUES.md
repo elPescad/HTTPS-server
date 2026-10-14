@@ -42,7 +42,7 @@ Reproduction commands assume the Linux build is running from `server/` (it loads
 | 25 | [Windows: only 64 sockets fit in an `fd_set`](#25-windows-only-64-sockets-fit-in-an-fd_set) | Windows | High |
 | 26 | [Windows: error paths that stop the server or keep going when they shouldn't](#26-windows-error-paths-that-stop-the-server-or-keep-going-when-they-shouldnt) | Windows | Low |
 | 27 | [Windows: finished connections stay open for up to a second](#27-windows-finished-connections-stay-open-for-up-to-a-second) | Windows | Low |
-| 28 | [Every request pays for a full TLS handshake](#28-every-request-pays-for-a-full-tls-handshake) | Both | High |
+| 28 | [Every request opens a new TLS connection, and full handshakes use RSA-4096](#28-every-request-opens-a-new-tls-connection-and-full-handshakes-use-rsa-4096) | Both | High |
 | 29 | [Every wakeup scans every connection for timeouts](#29-every-wakeup-scans-every-connection-for-timeouts) | Both | High |
 | 30 | [Large files are sent one 8 KB chunk per event-loop pass](#30-large-files-are-sent-one-8-kb-chunk-per-event-loop-pass) | Both | Medium |
 | 31 | [Disk reads block the event loop](#31-disk-reads-block-the-event-loop) | Both | Medium |
@@ -50,7 +50,7 @@ Reproduction commands assume the Linux build is running from `server/` (it loads
 | 33 | [One `accept()` per wakeup, plus extra syscalls per connection](#33-one-accept-per-wakeup-plus-extra-syscalls-per-connection) | Both | Low |
 | 34 | [Synchronous logging in the hot path](#34-synchronous-logging-in-the-hot-path) | Both | Low |
 | 35 | [Unchecked return values and uninitialised structs](#35-unchecked-return-values-and-uninitialised-structs) | Both | Low |
-| 36 | [Exit codes are inverted](#36-exit-codes-are-inverted) | Both | Low |
+| 36 | [Some startup failures exit with status 0](#36-some-startup-failures-exit-with-status-0) | Both | Low |
 
 ---
 
@@ -76,30 +76,31 @@ Reproduction commands assume the Linux build is running from `server/` (it loads
   The server log ends with `terminate called after throwing an instance of 'std::out_of_range'`.
 * **Fix:** Reject any target that is empty or doesn't start with `/` with a 400, and catch `std::exception` around request handling.
 
-Together, #1 and #2 are counterexamples to the README's claim that the server "cannot be crashed by large, malformed network payloads". The 8 KB size cap works, but malformed content can still crash it.
+#2 contradicts the claim in the main and Windows READMEs that the server "cannot be crashed by large, malformed network payloads", and #1 crashes the Linux build with a perfectly well-formed request. The 8 KB size cap works, but the content of a request can still crash the server.
 
 ### 3. Requests with more than 1 KB of headers hang until the timeout
 **Build:** Both · **Severity:** High
 
 * **What happens:** A request whose headers are bigger than 1024 bytes (a few cookies are enough) gets no response, and the connection is dropped after 10 s.
-* **Why:** OpenSSL has to read a whole TLS record, up to 16 KB, and check its integrity tag before it can decrypt any of it. `SSL_read` copies 1024 bytes into `buffer` and keeps the rest of the plaintext inside the `SSL` object (`SSL_pending()`). The kernel's receive queue is now empty, so the socket never becomes readable again, and neither level-triggered epoll nor `select()` wakes this connection. The 1024-byte buffer described in the README's "Memory-Cap Buffering" section is what triggers it.
+* **Why:** OpenSSL has to read a whole TLS record, up to 16 KB, and check its integrity tag before it can decrypt any of it. `SSL_read` copies 1024 bytes into `buffer` and keeps the rest of the plaintext inside the `SSL` object (`SSL_pending()`). The kernel's receive queue is now empty, so the socket never becomes readable again, and neither level-triggered epoll nor `select()` wakes this connection. The 1024-byte buffer described in the "Memory-Cap Buffering" section of the main and Windows READMEs is what triggers it.
 * **Reproduce:** `curl -k https://127.0.0.1:8080/ -H "Cookie: $(head -c 2000 /dev/zero | tr '\0' a)"` hangs for about 10 s and gets nothing. With `char buffer[16384]` the same request returns 200, and a 10 KB header correctly returns 431.
-* **Fix:** Keep calling `SSL_read` until it returns `SSL_ERROR_WANT_READ` (or loop while `SSL_pending() > 0`) before going back to `epoll_wait()`. This has to be fixed before switching to edge-triggered epoll, where every socket must be drained.
+* **Fix:** Keep calling `SSL_read` until it returns `SSL_ERROR_WANT_READ` (or loop while `SSL_pending() > 0`) before going back to `epoll_wait()` or `select()`. This has to be fixed before switching to edge-triggered epoll, where every socket must be drained.
 
 ### 4. One client's leftover OpenSSL error kills other clients' connections
 **Build:** Both · **Severity:** High
 
-* **What happens:** After one connection fails or times out, the next healthy connection whose request arrives in more than one TCP segment is dropped with no response.
-* **Why:** OpenSSL keeps one error queue per thread, and every connection shares this server's single thread. `SSL_get_error()` checks that queue first and returns `SSL_ERROR_SSL` if anything is in it, even when the call only needed a retry (`WANT_READ`/`WANT_WRITE`). The code never calls `ERR_clear_error()`, and two common paths leave entries behind:
-  * The timeout loop calls `SSL_shutdown()` on connections that never finished the handshake, which leaves `SSL_R_UNINITIALIZED` in the queue.
+* **What happens:** If one connection fails or times out while another has already finished its TLS handshake, that second connection is dropped with no response the next time its `SSL_read()` needs more data (for example when its request arrives in more than one TCP segment). The window lasts until the next `SSL_accept()` on any connection.
+* **Why:** OpenSSL keeps one error queue per thread, and every connection shares this server's single thread. `SSL_get_error()` checks that queue first and returns `SSL_ERROR_SSL` (or `SSL_ERROR_SYSCALL` for a system error) if anything is in it, even when the call only needed a retry (`WANT_READ`/`WANT_WRITE`). The code never calls `ERR_clear_error()`, and two common paths leave entries behind:
+  * The timeout loop calls `SSL_shutdown()` on connections that never finished the handshake. That leaves `SSL_R_UNINITIALIZED` in the queue if `SSL_accept()` never ran (a client that sent nothing), or `SSL_R_SHUTDOWN_WHILE_IN_INIT` if the handshake had started.
   * A client that closes without sending `close_notify` leaves "unexpected eof while reading".
 
-  The next legitimate `WANT_READ` is then treated as fatal. Only the next `SSL_accept()` clears the queue.
+  The next legitimate `WANT_READ` is then treated as fatal. Only the next `SSL_accept()` clears the queue, because OpenSSL's handshake code calls `ERR_clear_error()` itself; that's why a client that connects after the failure is not affected.
 * **Reproduce:**
-  1. Open a plain TCP connection that sends nothing (`nc 127.0.0.1 8080`) and let the server time it out after 10 s.
-  2. From a TLS client, send the request record in two TCP writes 0.3 s apart (for example Python with `ssl.MemoryBIO`). It gets no response.
+  1. Open a plain TCP connection that sends nothing (`nc 127.0.0.1 8080`).
+  2. About 8 s later, connect a TLS client (for example Python with `ssl.MemoryBIO`) and finish the handshake, but don't send the request yet.
+  3. After the server times out the idle connection (10 to 11 s after step 1), send the request record in two TCP writes 0.3 s apart. It gets no response.
 
-  Without the idle connection, the same request gets 200. Adding `ERR_clear_error()` before `SSL_read` fixes it.
+  With the same timing and no idle connection, the request gets 200. Adding `ERR_clear_error()` before `SSL_read` fixes it.
 * **Fix:** Call `ERR_clear_error()` before every `SSL_accept`/`SSL_read`/`SSL_write`/`SSL_shutdown`, drain the queue on every error path, and only call `SSL_shutdown()` once `SSL_is_init_finished()` is true.
 
 ### 5. The last chunk of a file is never re-sent after `WANT_WRITE`
@@ -119,7 +120,7 @@ Together, #1 and #2 are counterexamples to the README's claim that the server "c
 ### 6. Suspending and resuming the process shuts the server down
 **Build:** Linux · **Severity:** Medium
 
-* **What happens:** After Ctrl-Z then `fg` (SIGSTOP then SIGCONT), the server prints `epoll_wait failed Interrupted system call` and exits.
+* **What happens:** After Ctrl-Z then `fg` (SIGTSTP then SIGCONT; `kill -STOP` then `kill -CONT` does the same), the server prints `epoll_wait failed Interrupted system call` and exits.
 * **Why:** On Linux, `epoll_wait()` fails with `EINTR` after the process is stopped and continued, even when no signal handlers are installed (documented in `man 7 signal`). The loop treats every `-1` as fatal and `break`s.
 * **Reproduce:** `kill -STOP <pid>; kill -CONT <pid>`
 * **Fix:** `if (errno == EINTR) continue;`. Other blocking calls need the same handling once signal handlers are added (for example for a graceful SIGTERM shutdown).
@@ -148,7 +149,7 @@ Together, #1 and #2 are counterexamples to the README's claim that the server "c
 **Build:** Both · **Severity:** High
 
 * **What happens:** `/../dist-secret/s.txt` is served whenever a directory whose name starts with `dist` sits next to `dist/`.
-* **Why:** `resolvedStr.find(baseStr) == 0` compares strings, not path components: `/app/dist-secret/s.txt` starts with `/app/dist`. Also, the path resolution only happens at runtime (`std::filesystem`), not at compile time as the README says.
+* **Why:** `resolvedStr.find(baseStr) == 0` compares strings, not path components: `/app/dist-secret/s.txt` starts with `/app/dist`. Also, the path resolution only happens at runtime (`std::filesystem`), not at compile time as the main README says.
 * **Reproduce:** With a `dist-secret/` directory containing `s.txt` next to `dist/`, run `curl -k --path-as-is https://127.0.0.1:8080/../dist-secret/s.txt`.
 * **Fix:** Compare whole path components (for example `std::mismatch` over the two `fs::path`s), or require the prefix to be followed by a `/`. On Linux, `openat2()` with `RESOLVE_BENEATH` (kernel 5.6+) makes the kernel enforce it. That also closes the race between checking the path and opening it, for example a symlink swapped in between.
 
@@ -165,10 +166,10 @@ Together, #1 and #2 are counterexamples to the README's claim that the server "c
 
 * **What happens:**
   * `/index.html%00.png` serves `index.html`.
-  * Invalid escapes such as `%4G`, `%-1` and `% 1` are decoded instead of rejected.
-  * A file named `a+b.txt` can't be served.
+  * Invalid escapes such as `%4G`, `%-1` and `%+1` are decoded instead of rejected.
+  * A file named `a+b.txt` can't be served from its plain URL: `/a+b.txt` returns 404, and only `/a%2Bb.txt` works.
 * **Why:**
-  * Each escape is parsed with `istringstream >> std::hex`, which skips whitespace, accepts a sign and stops at the first non-hex character. The loop then always skips two characters.
+  * Each escape is parsed with `istringstream >> std::hex`, which accepts a sign and stops at the first non-hex character. The loop then always skips two characters.
   * A decoded `%00` stays inside the `std::string`, but the C-string system calls underneath stop at the NUL, so the path is cut short there.
   * Mapping `+` to a space is a rule for form-encoded query strings, not for paths (RFC 3986).
 * **Reproduce:** `curl -k https://127.0.0.1:8080/index.html%00.png` returns 200 with the HTML page.
@@ -179,7 +180,7 @@ Together, #1 and #2 are counterexamples to the README's claim that the server "c
 
 * **What happens:** A client that sends one byte every few seconds stays in the request-reading state long after the 10 s timeout. Only the 8 KB header cap limits it.
 * **Why:** `lastActivity` is reset on every `SSL_read` that returns data. The timeout is a sliding idle timer, not a deadline for receiving the whole header.
-* **Reproduce:** A TLS client that sends one byte of its request every 4 s stays connected for 28 s and still gets a 200.
+* **Reproduce:** A TLS client that sends `GET /\r\n\r\n` one byte every 4 s stays connected for 32 s, well past the 10 s timeout, and still gets a 200.
 * **Fix:** Record when the request started, and enforce an absolute deadline for the full header block.
 
 ### 13. No limit on concurrent connections
@@ -214,19 +215,19 @@ Together, #1 and #2 are counterexamples to the README's claim that the server "c
 **Build:** Both · **Severity:** Low (the trigger is rare)
 
 * **Why:** `SSL_ERROR_WANT_READ` from `SSL_write` is handled like `WANT_WRITE`, so the code waits for the socket to be *writable*. A connected socket is almost always writable, so if this ever happens the loop retries and spins until inbound data arrives. TLS 1.3 removed renegotiation, the usual trigger. What remains is something like a peer's `KeyUpdate` message arriving split across TCP segments in the middle of a write.
-* **Fix:** On `WANT_READ`, wait for `EPOLLIN`; on `WANT_WRITE`, wait for `EPOLLOUT`.
+* **Fix:** On `WANT_READ`, wait for readability (`EPOLLIN`, or `read_set` on Windows); on `WANT_WRITE`, wait for writability (`EPOLLOUT`, or `write_set`).
 
 ### 18. `SSL_read`'s `WANT_WRITE` is ignored while reading the request
 **Build:** Both · **Severity:** Low (the trigger is rare)
 
 * **Why:** In `STATE_READ_REQUEST`, `SSL_ERROR_WANT_WRITE` gets the same bare `continue` as `WANT_READ`, so the connection keeps waiting for readability. Suppose OpenSSL needs to send something (for example a `KeyUpdate` reply) while the send buffer is full, and the client is waiting for that before it sends more. Then the connection stalls until the 10 s timeout.
-* **Fix:** On `WANT_WRITE`, set `ioWantWrite` and switch the epoll interest to `EPOLLOUT`.
+* **Fix:** On `WANT_WRITE`, set `ioWantWrite` so the socket is watched for writability (`EPOLLOUT` on Linux, `write_set` on Windows).
 
 ### 19. `SSL_write` retry logic: dead partial-write branch, retry works by accident
 **Build:** Both · **Severity:** Low
 
 * **Why:** Two separate problems:
-  * **The partial-write branch never runs.** Unless `SSL_MODE_ENABLE_PARTIAL_WRITE` is set, `SSL_write` returns either the full length or an error, never a partial count. The 8 KB chunks also fit in one 16 KB TLS record. So the `iresult < bytesRead` branch is dead code, which 300 non-blocking writes against a tiny send buffer confirmed. The README's "partial write rollback" is really the `WANT_WRITE` rollback.
+  * **The partial-write branch never runs.** Unless `SSL_MODE_ENABLE_PARTIAL_WRITE` is set, `SSL_write` returns either the full length or an error, never a partial count. The 8 KB chunks also fit in one 16 KB TLS record. So the `iresult < bytesRead` branch is dead code, which 300 non-blocking writes against a tiny send buffer confirmed. The "partial write rollback" described in the main and Windows READMEs is really the `WANT_WRITE` rollback.
   * **The retry only works by accident.** That `WANT_WRITE` path re-reads the same bytes into the same stack array before retrying. OpenSSL requires a retry with the same pointer and length, or it fails with `SSL_R_BAD_WRITE_RETRY`. The retry works only because `fileBuf` ends up at the same stack address on every iteration.
 * **Fix:** Delete the dead branch, and keep the pending chunk in a per-connection buffer, which also fixes #5. Alternatively, set `SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER`.
 
@@ -239,7 +240,7 @@ Together, #1 and #2 are counterexamples to the README's claim that the server "c
 ### 21. Closing with unread data sends a TCP RST, which can truncate the response
 **Build:** Both · **Severity:** Low
 
-* **Why:** The server stops reading at the first `\r\n\r\n`. If more data is still in the socket's receive queue when it calls `close()` (a request body, or a second pipelined request in its own TLS record), Linux sends an RST instead of a FIN. The client then throws away response bytes it hasn't read yet: a 9.8 MB download was cut to 7.2 MB with `ECONNRESET`. Separately, `SSL_shutdown()` is called once on a non-blocking socket and never retried.
+* **Why:** The server stops reading at the first `\r\n\r\n`. If more data is still in the socket's receive queue when it calls `close()` (a request body, or a second pipelined request in its own TLS record), Linux sends an RST instead of a FIN and discards whatever part of the response is still in the server's send buffer, so the client gets a truncated body followed by `ECONNRESET`: a 9.8 MB download was cut to 7.2 MB. (Some client TCP stacks also drop data they received but the application hasn't read yet when the RST arrives.) Separately, `SSL_shutdown()` is called once on a non-blocking socket and never retried.
 * **Fix:** Drain the receiving side before closing (a "lingering close", as nginx does), and retry `SSL_shutdown()` on `WANT_READ`/`WANT_WRITE`.
 
 ### 22. Every `open()` failure is reported as "404 does not exist"
@@ -251,7 +252,7 @@ Together, #1 and #2 are counterexamples to the README's claim that the server "c
 ### 23. `std::tolower` on a negative `char` is undefined behaviour
 **Build:** Both · **Severity:** Low
 
-* **Why:** `std::tolower` is only defined for `unsigned char` values and `EOF`. Plain `char` is signed on x86 and with MSVC, so a header-name byte of 0x80 or above becomes a negative `int`. glibc tolerates this, but the MSVC debug runtime asserts. On Linux/arm64 plain `char` is unsigned, so this one depends on the platform.
+* **Why:** `std::tolower` is only defined for `unsigned char` values and `EOF`. Plain `char` is signed on x86 and with MSVC, so a header-name byte of 0x80 or above becomes a negative `int`. glibc tolerates it (its tables accept -128 to 255), and so does the MSVC runtime in the default "C" locale, but it is still undefined, and a C library that indexes a 256-entry table with it reads out of bounds. On Linux/arm64 plain `char` is unsigned, so this one depends on the platform.
 * **Fix:** `std::tolower(static_cast<unsigned char>(c))`.
 
 ### 24. A stale epoll event can be applied to a reused descriptor
@@ -267,7 +268,7 @@ Together, #1 and #2 are counterexamples to the README's claim that the server "c
 ### 25. Windows: only 64 sockets fit in an `fd_set`
 **Build:** Windows · **Severity:** High
 
-* **Why:** On Windows, `fd_set` is an array of 64 socket handles, not a bitmap (`FD_SETSIZE` defaults to 64), and `FD_SET` silently does nothing once it's full. The listener takes one slot, so only 63 handshaking or reading clients are polled on each pass. Clients further down the list never make progress and get dropped by the timeout, so about 63 idle connections are enough to lock everyone else out. `FD_SET` and `FD_ISSET` both scan the array linearly, so each pass costs O(N × 64).
+* **Why:** On Windows, `fd_set` is an array of 64 socket handles, not a bitmap (`FD_SETSIZE` defaults to 64), and `FD_SET` silently does nothing once it's full. The listener takes one slot, so only 63 handshaking or reading clients are polled on each pass. Clients further down the list never make progress and get dropped by the timeout. Purely idle connections are reaped after 10 s, so on their own they only delay others; but combined with #12, about 63 connections that finish the handshake and then trickle a byte every few seconds lock everyone else out. `FD_SET` and `FD_ISSET` both scan the array linearly, so each pass costs O(N × 64).
 * **Fix:** Use `WSAPoll()` or I/O completion ports (IOCP). At minimum, `#define FD_SETSIZE` to a larger value before including `winsock2.h`, and cap connections.
 
 ### 26. Windows: error paths that stop the server or keep going when they shouldn't
@@ -289,17 +290,17 @@ Together, #1 and #2 are counterexamples to the README's claim that the server "c
 
 ## Scalability: what stands between this server and C10k
 
-### 28. Every request pays for a full TLS handshake
+### 28. Every request opens a new TLS connection, and full handshakes use RSA-4096
 **Build:** Both · **Severity:** High (throughput)
 
-* **Why:** Every response is `Connection: close`, so a browser opens a new TCP + TLS connection for every asset. The certificate is also RSA-4096. On a 4-vCPU x86 VM, `openssl speed` measured about 220 RSA-4096 signatures per second per core, against about 40,000 for ECDSA P-256. So handshakes alone cap the server at a few hundred new connections per second.
-* **Fix:** Support HTTP keep-alive, switch to an ECDSA P-256 certificate, and enable TLS session resumption.
+* **Why:** Every response is `Connection: close`, so a browser opens a new TCP connection and does a new TLS handshake for every asset. OpenSSL's default session tickets let a returning client resume without a certificate signature, but every new client (or one whose ticket expired) does a full handshake, and that signs with an RSA-4096 key. On a 4-vCPU x86 VM, `openssl speed` measured about 200 RSA-4096 signatures per second per core, against roughly 30,000 to 40,000 for ECDSA P-256, so full handshakes alone cap the server at a few hundred new clients per second.
+* **Fix:** Support HTTP keep-alive and switch to an ECDSA P-256 certificate. Session resumption already works with OpenSSL's defaults, so keep it on (and share the ticket key if the server ever runs as several processes).
 
 ### 29. Every wakeup scans every connection for timeouts
 **Build:** Both · **Severity:** High (scalability)
 
-* **Why:** The timeout loop walks the whole `clients` list after every `epoll_wait()`/`select()` return, so each event costs O(N). That cancels out epoll's advantage of only reporting the ready sockets. `std::list` is node-based, so the scan is also one likely cache miss per connection.
-* **Fix:** There are only two timeout lengths, so keep each connection in a list ordered by last activity. On activity, `splice()` it to the back in O(1), and expire connections from the front. Or use a timer wheel or min-heap. Either way, pass the next deadline as the `epoll_wait()` timeout instead of a fixed 1 s.
+* **Why:** The timeout loop walks the whole `clients` list after every `epoll_wait()`/`select()` return, so each wakeup costs O(N) however few sockets are ready. That cancels out epoll's advantage of only reporting the ready sockets. `std::list` is node-based, so the scan is also one likely cache miss per connection.
+* **Fix:** There are only two timeout lengths (10 s and 60 s), so keep one list per length, each ordered by last activity. On activity, `splice()` the connection to the back of its list in O(1) (moving it to the other list when its state changes), and expire connections from the front of each list. Or use a timer wheel or min-heap. Either way, pass the next deadline as the `epoll_wait()` timeout instead of a fixed 1 s.
 
 ### 30. Large files are sent one 8 KB chunk per event-loop pass
 **Build:** Both · **Severity:** Medium
@@ -335,7 +336,7 @@ Together, #1 and #2 are counterexamples to the README's claim that the server "c
 ## Minor
 
 ### 35. Unchecked return values and uninitialised structs
-**Build:** Both · **Severity:** Low
+**Build:** Both (the `epoll`/`fcntl` items are Linux only) · **Severity:** Low
 
 * **Why:**
   * The results of `epoll_ctl()`, `setsockopt()` and `fcntl(F_GETFL)` are ignored. For example, a failed `EPOLL_CTL_ADD` leaves a client in the list but never polled.
@@ -344,8 +345,8 @@ Together, #1 and #2 are counterexamples to the README's claim that the server "c
   * `epfd` is never closed.
 * **Fix:** Check every call, write `sockaddr_in service{};`, and remove a socket from epoll before closing it.
 
-### 36. Exit codes are inverted
+### 36. Some startup failures exit with status 0
 **Build:** Both · **Severity:** Low
 
-* **Why:** `main()` returns 0 when `SSL_CTX_new()` fails (and, on Windows, when the Winsock version check fails), and returns 1 at the end. The server only reaches the end after an error. So a supervisor or script sees "success" when initialisation fails.
-* **Fix:** Return `EXIT_FAILURE` on every error path.
+* **Why:** `main()` returns 0 (success) when `SSL_CTX_new()` fails, and on Windows also when the Winsock version check fails. Every other failure, such as a missing `cert.pem` or a port that is already in use, falls through to `return 1` at the end of `main()`. That result is right, but only by accident: `runServer()` returns `void`, so `main()` can't tell an error from a normal exit.
+* **Fix:** Return `EXIT_FAILURE` from those two paths, and have `runServer()` return a status that `main()` passes on.

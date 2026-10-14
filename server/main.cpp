@@ -91,8 +91,8 @@ std::string urlDecode(const std::string& encoded)
             //Check if there are at least 2 digits left
             if(i + 2 < encoded.length())
             {
-                //KNOWN BUG #11: >> std::hex skips spaces, accepts a sign and stops at the first
-                //non-hex char, so "%4G", "%-1" and "% 1" decode instead of failing, and "%00"
+                //KNOWN BUG #11: >> std::hex accepts a sign and stops at the first non-hex char,
+                //so "%4G", "%-1" and "%+1" decode instead of failing, and "%00"
                 //puts a NUL in the path (the syscalls then cut the path short there).
                 int hexValue;
                 //gets the two hex digits after the %
@@ -117,7 +117,7 @@ std::string urlDecode(const std::string& encoded)
             }
         }
         //KNOWN BUG #11: '+' means space only in form-encoded query strings, not in
-        //paths, so a file named "a+b.txt" can never be served.
+        //paths, so a plain link to "a+b.txt" looks for "a b.txt" and 404s (only %2B works).
         else if(encoded[i] == '+')
         {
             decoded += ' '; //some old encodings use '+' for space
@@ -187,8 +187,8 @@ void runServer(SSL_CTX* ctx)
 
     //load the certificate onto the ctx
     //KNOWN BUG #16: key.pem is committed to the repo.
-    //KNOWN BUG #28: the cert is RSA-4096; its signature (done in every handshake)
-    //is ~180x slower than ECDSA P-256.
+    //KNOWN BUG #28: the key is RSA-4096; signing with it (done in every full, non-resumed
+    //handshake) is over 150x slower than with an ECDSA P-256 key.
     if(SSL_CTX_use_PrivateKey_file(ctx, "key.pem", SSL_FILETYPE_PEM) != 1)
     {
         std::cout << "Failed to load key.pem" << std::endl;
@@ -213,8 +213,8 @@ void runServer(SSL_CTX* ctx)
     
     //allows socket to bind to address that is in the TIME_WAIT state
     int opt = 1;
-    //KNOWN BUG #15: on Windows SO_REUSEADDR lets another process bind this same
-    //port while we listen (use SO_EXCLUSIVEADDRUSE). KNOWN BUG #35: unchecked.
+    //KNOWN BUG #15: on Windows SO_REUSEADDR lets another process that also sets it
+    //bind this port while we listen (use SO_EXCLUSIVEADDRUSE). KNOWN BUG #35: unchecked.
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
 
     //set to nonzero for non blocking
@@ -369,7 +369,8 @@ void runServer(SSL_CTX* ctx)
         iresult = select(0, &read_set, &write_set, nullptr, &tv);
         if(iresult > 0)
         {
-            //KNOWN BUG #34: printed and flushed on every wakeup, i.e. once per 8 KB chunk
+            //KNOWN BUG #34: printed and flushed whenever select reports a ready socket,
+            //i.e. once per 8 KB chunk during a download
             std::cout << "Select succesful" << std::endl;
         }
         else if(iresult == SOCKET_ERROR)
@@ -438,8 +439,9 @@ void runServer(SSL_CTX* ctx)
             {
                 std::cout << "Client timed out. Disconnecting.\n";
                 //KNOWN BUG #4: on a client that never finished the handshake this leaves an
-                //error in OpenSSL's per-thread error queue, which is never cleared, so the next
-                //healthy connection's WANT_READ is misread as fatal. Call ERR_clear_error().
+                //error in OpenSSL's per-thread error queue that the code never clears (only the
+                //next SSL_accept does), so a connection already past its handshake can have a
+                //normal WANT_READ misread as fatal. Call ERR_clear_error() before SSL calls.
                 SSL_shutdown(it->clientSSL);
                 SSL_free(it->clientSSL);
                 closesocket(it->clientSock);
@@ -671,10 +673,11 @@ void runServer(SSL_CTX* ctx)
                         //Try to open file only if we have a valid path and no error yet
                         if(!filePath.empty() && it->writeBuffer.empty())
                         {
-                            //KNOWN BUG #1: the Linux build crashes here on a directory; the Windows C
-                            //runtime can't open directories, so this build should 404 instead, but
-                            //fs::file_size below is still outside any try.
-                            //KNOWN BUG #31: ifstream reads are blocking disk I/O on the event-loop thread
+                            //KNOWN BUG #1: the Linux build opens a directory here, then crashes when
+                            //fs::file_size below throws; the Windows C runtime can't open directories, so
+                            //this build should 404 instead, but fs::file_size is still outside any try.
+                            //KNOWN BUG #31: this open(), fs::file_size() and the reads in the write state
+                            //are blocking disk I/O on the event-loop thread
                             it->fileStream.open(filePath, std::ios::binary);
                             if(it->fileStream.is_open())
                             {
@@ -686,7 +689,8 @@ void runServer(SSL_CTX* ctx)
                                 //writeBuffer holds only the https headers
                                 //the body comes from fileStream in STATE_WRITE_RESPONSE
                                 //KNOWN BUG #28: Connection: close means every request (every image, script...)
-                                //pays for a new TCP connection and a full TLS handshake
+                                //pays for a new TCP connection and a new TLS handshake (a full RSA-4096 one
+                                //unless the client resumes a session)
                                 it->writeBuffer = "HTTP/1.1 200 OK\r\n"
                                                   "Content-Type: " + mime + "\r\n"
                                                   "Content-Length: " + std::to_string(it->fileBytesLeft) + "\r\n"
@@ -698,7 +702,8 @@ void runServer(SSL_CTX* ctx)
                             else
                             {
                                 //KNOWN BUG #10: reflects the URL and the absolute server path into HTML
-                                //unescaped (reflected XSS). KNOWN BUG #22: other open() errors also end up here as 404.
+                                //unescaped (reflected XSS).
+                                //KNOWN BUG #22: other open() errors also end up here as 404.
                                 std::string body = "<h1>404 Not Found</h1><p>'" + filePath + "' does not exist.</p>";
                                 it->writeBuffer = "HTTP/1.1 404 Not Found\r\n"
                                                   "Content-Type: text/html\r\n"
@@ -730,7 +735,7 @@ void runServer(SSL_CTX* ctx)
                         continue;
                     }
                     //KNOWN BUG #4: a client that closes without close_notify leaves "unexpected
-                    //eof while reading" in the error queue here, and nothing drains it
+                    //eof while reading" in the error queue here, and the code never clears it
                     //connection closed or real error
                     SSL_free(it->clientSSL);
                     closesocket(it->clientSock);

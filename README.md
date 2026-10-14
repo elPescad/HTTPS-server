@@ -20,12 +20,12 @@ Regardless of the underlying OS flavor, both implementations enforce strict prod
 
 A later review of both builds found 36 bugs that aren't fixed yet. Each one is documented in **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** with its root cause, reproduction steps and a planned fix, and tagged in the source as `KNOWN BUG #N`. The most significant:
 
-* **#1, #2: One malformed request can crash the server.** A request for a directory, or a request line with no path, throws an exception that is never caught.
+* **#1, #2: One request can crash the server.** On the Linux build a request for a directory crashes it, and on both builds so does a request line with no path, because the exception is never caught. This contradicts the "cannot be crashed" claim in the Memory-Cap Buffering section below.
 * **#3: Requests with more than 1 KB of headers hang.** OpenSSL keeps the rest of the decrypted TLS record in its own buffer, so the socket never becomes readable again and the request times out.
-* **#4: One client's OpenSSL error can kill other clients' connections.** OpenSSL's per-thread error queue is never cleared, so a harmless `WANT_READ` on a healthy connection is treated as fatal.
-* **#9: Path traversal through a sibling directory.** The `dist/` check compares strings, not path components, so `../dist-secret/` passes it.
-* **#25: The Windows build polls at most 64 sockets.** `FD_SETSIZE` defaults to 64, and the extra clients are silently never polled.
-* **#28, #29: The main C10k blockers.** Every request pays for a full RSA-4096 TLS handshake (`Connection: close`), and every wakeup scans every connection for timeouts.
+* **#4: One client's OpenSSL error can kill other clients' connections.** The code never clears OpenSSL's per-thread error queue, so after one connection fails, a harmless `WANT_READ` on another connection that is already past its handshake is treated as fatal.
+* **#9: Path traversal through a sibling directory.** The `dist/` check compares strings, not path components, so `/../dist-secret/` passes it. The Directory Traversal Protection above is therefore incomplete, and its resolution happens only at runtime.
+* **#25: Each `fd_set` in the Windows build holds at most 64 sockets.** `FD_SETSIZE` defaults to 64, so with the listener taking one slot only 63 reading clients are polled per pass, and the rest are silently skipped.
+* **#28, #29: The main C10k blockers.** Every request opens a new TCP connection and TLS handshake (`Connection: close`), and every new client's full handshake signs with an RSA-4096 key. Every wakeup also scans every connection for timeouts.
 
 # (WINDOWS BRANCH) Asynchronous Windows HTTPS Server (Winsock2 + OpenSSL)
 
