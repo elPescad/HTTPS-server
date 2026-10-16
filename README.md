@@ -11,7 +11,7 @@ This repository is split across dedicated branches to isolate operating system p
 * **[Linux Server](https://github.com/elPescad/HTTPS-server/blob/feat/Linux-Server/server/main.cpp)**
 * **[Windows Server](https://github.com/elPescad/HTTPS-server/blob/feat/Windows-server/server/main.cpp)**
 
-Regardless of the underlying OS flavor, both implementations enforce strict production-grade security constraints written purely in modern C++:
+Regardless of the underlying OS flavor, both implementations enforce security constraints written purely in modern C++:
 * **Directory Traversal Protection:** Mitigation of `../` attacks via compile-time and runtime filesystem resolution using `std::filesystem::canonical`.
 * **DoS Mitigation:** Strict 8KB buffer limits on HTTP request headers to prevent memory exhaustion attacks, gracefully failing with an HTTP `431 Request Header Fields Too Large` response.
 * **Hardened HTTP Headers:** Native injection of security headers including HTTP Strict Transport Security (HSTS), `X-Content-Type-Options: nosniff`, and `X-Frame-Options: DENY`.
